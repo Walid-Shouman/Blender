@@ -40,6 +40,7 @@
 #include "BLI_alloca.h"
 #include "BLI_path_util.h"
 #include "BLI_math.h"
+#include "BLI_blenlib.h"
 
 #include "BKE_context.h"
 #include "BKE_depsgraph.h"
@@ -60,6 +61,8 @@
 #include "ED_object.h"
 #include "ED_uvedit.h"
 #include "ED_view3d.h"
+
+#include "bmesh_tools.h"
 
 #include "mesh_intern.h"  /* own include */
 
@@ -390,6 +393,210 @@ bool ED_mesh_uv_texture_remove_named(Mesh *me, const char *name)
 	}
 }
 
+static EnumPropertyItem replace_mode_item[] = {
+    {REPLACE_ACTIVE_GROUP,
+	 "REPLACE_ACTIVE_GROUP", 0, "Active", "Overwrite active group only"},
+    {REPLACE_ENOUGH_GROUPS,
+	 "REPLACE_ENOUGH_GROUPS", 0, "Enough", "Overwrite source groups only as needed"},
+    {REPLACE_ALL_GROUPS,
+	 "REPLACE_ALL_GROUPS", 0, "All", "Overwrite all groups"},
+    {APPEND_GROUPS,
+	 "APPEND_GROUPS", 0, "Append", "Add groups without overwriting"},
+	{0, NULL, 0, NULL, NULL}
+};
+
+typedef enum FromToActive {
+	FROM_ACTIVE = 1,
+	TO_ACTIVE = 2
+} FromToActive;
+
+static EnumPropertyItem from_to_active[] = {
+    {FROM_ACTIVE,
+	 "FROM_ACTIVE", 0, "From active", "Transfer to different objects"},
+    {TO_ACTIVE,
+	 "TO_ACTIVE", 0, "To active", "Better to faster tweek the output"},
+    {0, NULL, 0, NULL, NULL}
+};
+
+static EnumPropertyItem transfer_mode_item[] = {
+    {TRANSFER_BY_INDEX,
+	 "TRANSFER_BY_INDEX", 0, "By index", "copy between identical indices meshes"},
+    {TRANSFER_BY_TOPOLOGY,
+	 "TRANSFER_BY_TOPOLOGY", 0, "By topology", "use if the same topology with different indices"},
+    {TRANSFER_BY_INTERPOLATION,
+	 "TRANSFER_BY_INTERPOLATION", 0, "By interpolation", "interpolate for different topologies"},
+	{0, NULL, 0, NULL, NULL}
+};
+
+static bool ED_mesh_uv_transfer(Object *ob_dst, Object *ob_src, bContext *UNUSED(C), Scene *UNUSED(scene), wmOperator * op)
+{
+	Mesh *me_dst, *me_src;
+	BMesh *bm_dst, *bm_src;
+
+
+	bool relative_to_target = RNA_boolean_get(op->ptr, "rel_to_target");
+	ReplaceGroupMode replace_mode = RNA_enum_get(op->ptr, "replace_mode");
+	bool use_tolerance = RNA_boolean_get(op->ptr, "use_tol");
+	float tolerance2 = RNA_float_get(op->ptr, "tol");
+	PropertyRNA *tolerance_prop = RNA_struct_find_property(op->ptr, "tol");
+	TransferMode transfer_mode = RNA_enum_get(op->ptr, "transfer_mode");
+
+	int num_src_lay, num_dst_lay;
+
+	int i;
+
+	float tmp_mat[4][4];
+
+	int CD_src;
+	int active_dst, active_src;
+	char *src_name;
+
+	struct ReplaceLayerInfo replace_info;
+
+	invert_m4_m4(ob_src->imat, ob_src->obmat);
+	mul_m4_m4m4(tmp_mat, ob_src->imat, ob_dst->obmat);
+
+	if(use_tolerance == false)
+		RNA_def_property_flag(tolerance_prop, PROP_HIDDEN);
+	else
+		RNA_def_property_clear_flag(tolerance_prop, PROP_HIDDEN);
+
+	me_dst = ob_dst->data;
+	me_src = ob_src->data;
+
+	//manipulating the layers first as its interface uses the Mesh structure not the BMesh
+	num_src_lay = CustomData_number_of_layers(&me_src->ldata, CD_MLOOPUV);
+	num_dst_lay = CustomData_number_of_layers(&me_dst->ldata, CD_MLOOPUV);
+
+	if (num_src_lay < 1) {
+		//the source should have UV layers
+		BKE_report(op->reports, RPT_ERROR,
+		           "Transfer failed no UV groups were found (source mesh should have -at least- 1 UV group)");
+
+		return false;
+	}
+
+	if (replace_mode == REPLACE_ENOUGH_GROUPS) {
+
+		//add layers as needed
+		i = num_src_lay - num_dst_lay;
+		while (i > 0) {
+			ED_mesh_uv_texture_add(me_dst, NULL, true);
+			i--;
+		}
+		CD_src = CustomData_get_layer_index(&me_src->pdata, CD_MTEXPOLY);
+		//copy the names
+		for (i = 0; i < num_src_lay; ++i) {
+
+			src_name = me_src->pdata.layers[CD_src + i].name;
+			CustomData_set_layer_name(&me_dst->ldata, CD_MLOOPUV, i, src_name);
+			CustomData_set_layer_name(&me_dst->pdata, CD_MTEXPOLY, i, src_name);
+//			CustomData_set_layer_name(&me_dst->fdata, CD_MFACE, i, src_name);	//could that be of any need?
+		}
+
+
+		replace_info.src_lay_start = 0;
+		replace_info.src_lay_end = num_src_lay - 1;
+		replace_info.dst_lay_start = 0;
+		replace_info.dst_lay_end = num_src_lay - 1;
+	}
+
+	//we'll tell the copy function to start copying from # of source layers from the end of the dst layers
+	else if (replace_mode == APPEND_GROUPS)
+	{
+		CD_src = CustomData_get_layer_index(&me_src->pdata, CD_MTEXPOLY);
+		for (i = 0; i < num_src_lay; ++i) {
+
+			src_name = me_src->pdata.layers[CD_src + i].name;
+			//append uv layer with the src names
+			ED_mesh_uv_texture_add(me_dst, src_name, true);
+		}
+
+		replace_info.src_lay_start = 0;
+		replace_info.src_lay_end = num_src_lay - 1;
+		replace_info.dst_lay_start = num_dst_lay;
+		replace_info.dst_lay_end = num_dst_lay + num_src_lay - 1;
+	}
+
+	else if (replace_mode == REPLACE_ALL_GROUPS)
+	{
+		i = num_dst_lay;
+		while (i > 0) {
+			i--;
+			ED_mesh_uv_texture_remove_index(me_dst, i);
+		}
+
+		CD_src = CustomData_get_layer_index(&me_src->pdata, CD_MTEXPOLY);
+		for (i = 0; i < num_src_lay; ++i) {
+			src_name = me_src->pdata.layers[CD_src + i].name;
+			//add uv layer with the src name
+			ED_mesh_uv_texture_add(me_dst, src_name, true);
+		}
+
+		replace_info.src_lay_start = 0;
+		replace_info.src_lay_end = num_src_lay - 1;
+		replace_info.dst_lay_start = 0;
+		replace_info.dst_lay_end = num_src_lay - 1;
+
+	}
+
+	else if (replace_mode == REPLACE_ACTIVE_GROUP) {
+
+		//find the source active layer
+		active_src = CustomData_get_active_layer_index(&me_src->ldata, CD_MLOOPUV) - me_src->ldata.typemap[CD_MLOOPUV];
+		active_dst = CustomData_get_active_layer_index(&me_dst->ldata, CD_MLOOPUV) - me_src->ldata.typemap[CD_MLOOPUV];
+
+		CD_src = CustomData_get_layer_index(&me_src->pdata, CD_MTEXPOLY);
+
+		if (num_dst_lay == 0) {	//empty destination
+			src_name = me_src->pdata.layers[CD_src + active_src].name;
+
+			//add uv layer with the src name
+			ED_mesh_uv_texture_add(me_dst, src_name, true);
+
+			//make the added layer the active one
+			///what about the MTEXPOLY
+			active_dst = 0;
+			CustomData_set_layer_active(&me_dst->ldata, CD_MLOOPUV, active_dst);
+		}
+
+		else {	//destination has layers (accordingly there's a selected layer)
+
+			src_name = me_src->pdata.layers[CD_src + active_src].name;
+
+			CustomData_set_layer_name(&me_dst->ldata, CD_MLOOPUV, active_dst, src_name);
+			CustomData_set_layer_name(&me_dst->pdata, CD_MTEXPOLY, active_dst, src_name);
+		}
+
+		replace_info.src_lay_start = active_src;
+		replace_info.src_lay_end = replace_info.src_lay_start;
+		replace_info.dst_lay_start = active_dst;	//fixing the indices
+		replace_info.dst_lay_end = replace_info.dst_lay_start;
+	}
+
+	//allocate space
+	bm_src = BM_mesh_create(&bm_mesh_allocsize_default);
+	bm_dst = BM_mesh_create(&bm_mesh_allocsize_default);
+
+	BM_mesh_bm_from_me(bm_src, me_src, TRUE, true, 0);	//TRUE -> should transfer shapekeys too!!
+	BM_mesh_bm_from_me(bm_dst, me_dst, TRUE, true, 0);
+
+	if (!BM_mesh_data_copy(bm_src, bm_dst, &replace_info, CD_MLOOPUV, transfer_mode, relative_to_target, tmp_mat,
+	                       use_tolerance, tolerance2)) {
+		return false;
+	}
+
+	//transfer the BMesh back to Mesh
+	BM_mesh_bm_to_me(bm_src, me_src, FALSE);
+	BM_mesh_bm_to_me(bm_dst, me_dst, TRUE);
+
+	//free the BMesh
+	BM_mesh_free(bm_src);
+	BM_mesh_free(bm_dst);
+
+	return true;
+}
+
 /* note: keep in sync with ED_mesh_uv_texture_add */
 int ED_mesh_color_add(Mesh *me, const char *name, const bool active_set)
 {
@@ -483,6 +690,170 @@ bool ED_mesh_color_remove_named(Mesh *me, const char *name)
 	else {
 		return false;
 	}
+}
+static bool ED_mesh_vertex_color_transfer(Object *ob_dst, Object *ob_src, bContext *UNUSED(C), Scene *UNUSED(scene), wmOperator * op)
+{
+	Mesh *me_dst, *me_src;
+	BMesh *bm_dst, *bm_src;
+
+	bool relative_to_target = RNA_boolean_get(op->ptr, "rel_to_target");
+	ReplaceGroupMode replace_mode = RNA_enum_get(op->ptr, "replace_mode");
+	bool use_tolerance = RNA_boolean_get(op->ptr, "use_tol");
+	float tolerance2 = RNA_float_get(op->ptr, "tol");
+	PropertyRNA *tolerance_prop = RNA_struct_find_property(op->ptr, "tol");
+	TransferMode transfer_mode = RNA_enum_get(op->ptr, "transfer_mode");
+
+	int num_src_lay, num_dst_lay;
+
+	int i;
+
+	float tmp_mat[4][4];
+
+	int CD_src;
+	int active_dst, active_src;
+	char *src_name;
+
+	struct ReplaceLayerInfo replace_info;
+
+	invert_m4_m4(ob_src->imat, ob_src->obmat);
+	mul_m4_m4m4(tmp_mat, ob_src->imat, ob_dst->obmat);
+
+	if(use_tolerance == false)
+		RNA_def_property_flag(tolerance_prop, PROP_HIDDEN);
+	else
+		RNA_def_property_clear_flag(tolerance_prop, PROP_HIDDEN);
+
+	me_dst = ob_dst->data;
+	me_src = ob_src->data;
+
+	//manipulating the layers first as its interface uses the Mesh structure not the BMesh
+	num_src_lay = CustomData_number_of_layers(&me_src->ldata, CD_MLOOPCOL);
+	num_dst_lay = CustomData_number_of_layers(&me_dst->ldata, CD_MLOOPCOL);
+
+	if (num_src_lay < 1) {
+		//the source should have UV layers
+		BKE_report(op->reports, RPT_ERROR,
+		           "Transfer failed no color groups were found (source mesh should have -at least- 1 Vertex col group)");
+
+		return false;
+	}
+
+	if (replace_mode == REPLACE_ENOUGH_GROUPS) {
+
+		//add layers as needed
+		i = num_src_lay - num_dst_lay;
+		while (i > 0) {
+			ED_mesh_color_add(me_dst, NULL, true);
+			i--;
+		}
+		CD_src = CustomData_get_layer_index(&me_src->ldata, CD_MLOOPCOL);
+		//copy the names
+		for (i = 0; i < num_src_lay; ++i) {
+
+			src_name = me_src->ldata.layers[CD_src + i].name;
+			CustomData_set_layer_name(&me_dst->ldata, CD_MLOOPCOL, i, src_name);
+		}
+
+		replace_info.src_lay_start = 0;
+		replace_info.src_lay_end = num_src_lay - 1;
+		replace_info.dst_lay_start = 0;
+		replace_info.dst_lay_end = num_src_lay - 1;
+	}
+
+	//we'll tell the copy function to start copying from # of source layers from the end of the dst layers
+	else if (replace_mode == APPEND_GROUPS)
+	{
+		CD_src = CustomData_get_layer_index(&me_src->ldata, CD_MLOOPCOL);
+		for (i = 0; i < num_src_lay; ++i) {
+
+			src_name = me_src->ldata.layers[CD_src + i].name;
+			//append uv layer with the src names
+			ED_mesh_color_add(me_dst, src_name, true);
+		}
+
+		replace_info.src_lay_start = 0;
+		replace_info.src_lay_end = num_src_lay - 1;
+		replace_info.dst_lay_start = num_dst_lay;
+		replace_info.dst_lay_end = num_dst_lay + num_src_lay - 1;
+	}
+
+	else if (replace_mode == REPLACE_ALL_GROUPS)
+	{
+		i = num_dst_lay;
+		while (i > 0) {
+			i--;
+			ED_mesh_color_remove_index(me_dst, i);
+		}
+
+		CD_src = CustomData_get_layer_index(&me_src->ldata, CD_MLOOPCOL);
+		for (i = 0; i < num_src_lay; ++i) {
+			src_name = me_src->ldata.layers[CD_src + i].name;
+			//add uv layer with the src name
+			ED_mesh_color_add(me_dst, src_name, true);
+		}
+
+		replace_info.src_lay_start = 0;
+		replace_info.src_lay_end = num_src_lay - 1;
+		replace_info.dst_lay_start = 0;
+		replace_info.dst_lay_end = num_src_lay - 1;
+	}
+
+	else if (replace_mode == REPLACE_ACTIVE_GROUP) {
+
+		//find the source active layer
+		active_src = CustomData_get_active_layer_index(&me_src->ldata, CD_MLOOPCOL) - me_src->ldata.typemap[CD_MLOOPCOL];
+		active_dst = CustomData_get_active_layer_index(&me_dst->ldata, CD_MLOOPCOL) - me_dst->ldata.typemap[CD_MLOOPCOL];
+
+		CD_src = CustomData_get_layer_index(&me_src->ldata, CD_MLOOPCOL);
+
+		if (num_dst_lay == 0) {	//empty destination
+			src_name = me_src->ldata.layers[CD_src + active_src].name;
+
+			//add uv layer with the src name
+			ED_mesh_color_add(me_dst, src_name, true);
+
+			//make the added layer the active one
+			///what about the MTEXPOLY
+			active_dst = 0;
+			CustomData_set_layer_active(&me_dst->ldata, CD_MLOOPCOL, active_dst);
+		}
+
+		else {	//destination has layers (accordingly there's a selected layer)
+
+			src_name = me_src->ldata.layers[CD_src + active_src].name;
+
+			CustomData_set_layer_name(&me_dst->ldata, CD_MLOOPCOL, active_dst, src_name);
+		}
+
+		replace_info.src_lay_start = active_src;
+		replace_info.src_lay_end = replace_info.src_lay_start;
+		replace_info.dst_lay_start = active_dst;	//fixing the indices
+		replace_info.dst_lay_end = replace_info.dst_lay_start;
+	}
+
+	//allocate space
+	bm_src = BM_mesh_create(&bm_mesh_allocsize_default);
+	bm_dst = BM_mesh_create(&bm_mesh_allocsize_default);
+
+	BM_mesh_bm_from_me(bm_src, me_src, TRUE, true, 0);	//TRUE -> should transfer shapekeys too!!
+	BM_mesh_bm_from_me(bm_dst, me_dst, TRUE, true, 0);
+
+	if (!BM_mesh_data_copy(bm_src, bm_dst, &replace_info, CD_MLOOPCOL, transfer_mode, relative_to_target, tmp_mat,
+	                       use_tolerance, tolerance2)) {
+		return false;
+	}
+
+
+	//transfer the BMesh back to Mesh
+	BM_mesh_bm_to_me(bm_src, me_src, FALSE);
+	BM_mesh_bm_to_me(bm_dst, me_dst, TRUE);
+
+	//free the BMesh
+	BM_mesh_free(bm_src);
+	BM_mesh_free(bm_dst);
+
+	return true;
+
 }
 
 /*********************** UV texture operators ************************/
@@ -640,6 +1011,88 @@ void MESH_OT_uv_texture_remove(wmOperatorType *ot)
 	ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
+static int uv_transfer_exec(bContext *C, wmOperator * op)
+{
+	Scene *scene = CTX_data_scene(C);
+	Object *ob_act = CTX_data_active_object(C);
+	int fail = 0;
+
+	bool transfer_first_to_act = true;
+
+	FromToActive from_active = RNA_enum_get(op->ptr, "from_to_active");
+
+	/* Macro to loop through selected objects.*/
+	CTX_DATA_BEGIN (C, Object *, ob_slc, selected_editable_objects)
+	{
+		//if the selected isn't the active object
+		if (ob_act != ob_slc) {
+
+			if (from_active == TO_ACTIVE) {
+
+				//if many objects were selected within this mode ... we should copy only from the first
+				//notice that ob_slc priority isn't set by order of selection!
+				if (transfer_first_to_act == true) {
+					transfer_first_to_act = false;
+
+					if (!ED_mesh_uv_transfer(ob_act, ob_slc, C, scene, op)) {
+						fail++;
+					}
+				}
+			}
+
+			else {		//copy from the active to all the other selected
+				if (!ED_mesh_uv_transfer(ob_slc, ob_act, C, scene, op)) {
+					fail++;
+				}
+			}
+		}
+}
+
+	////ported from transfer weights
+	/* Event notifiers for correct display of data.*/
+	DAG_id_tag_update(&ob_slc->id, OB_RECALC_DATA);
+	WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob_slc);
+	WM_event_add_notifier(C, NC_GEOM | ND_DATA, ob_slc->data);
+
+	CTX_DATA_END;
+
+	if (fail != 0) {
+		return OPERATOR_CANCELLED;
+	}
+	else {
+		return OPERATOR_FINISHED;
+	}
+}
+
+void MESH_OT_uv_transfer_new(wmOperatorType *ot)
+{
+	/* identifiers */
+	ot->name = "Transfer UV (new)";
+	ot->idname = "MESH_OT_uv_transfer_new";
+	ot->description = "Transfer UV maps to the selected objects";
+
+	/* api callbacks */
+	ot->poll = layers_poll;			//don't know how to edit this yet!!
+	ot->exec = uv_transfer_exec;
+
+	/* flags */
+	ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;	//not revised!!
+
+	/* properties */
+	RNA_def_boolean(ot->srna, "rel_to_target", false,
+	                "Relative to target", "select this if you want the transfer to be relative to the target");
+	RNA_def_enum(ot->srna, "replace_mode", replace_mode_item, 2,
+	             "Replace/Append", "define which groups to move");
+	RNA_def_enum(ot->srna, "from_to_active", from_to_active, 2, "From/To active object",
+	             "Choose the transfer direction");
+	RNA_def_boolean(ot->srna, "use_tol", false, "Use Tolerance",
+	                "use a tolerance less than infinity to search for the nearest source faces");
+	RNA_def_float(ot->srna, "tol", 1, 0, FLT_MAX, "Tolerance",
+	              "Overwrite the search area to be a value other than infinity; useful for partial transfer", 0, 1000);
+	RNA_def_enum(ot->srna, "transfer_mode", transfer_mode_item, 1,
+	             "index, topology or interpolate", "define which groups to move");
+}
+
 /*********************** vertex color operators ************************/
 
 static int mesh_vertex_color_add_exec(bContext *C, wmOperator *UNUSED(op))
@@ -692,6 +1145,88 @@ void MESH_OT_vertex_color_remove(wmOperatorType *ot)
 
 	/* flags */
 	ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static int vertex_color_transfer_exec(bContext *C, wmOperator * op)
+{
+	Scene *scene = CTX_data_scene(C);
+	Object *ob_act = CTX_data_active_object(C);
+	int fail = 0;
+
+	bool transfer_first_to_act = true;
+
+	FromToActive from_active = RNA_enum_get(op->ptr, "from_to_active");
+
+	/* Macro to loop through selected objects.*/
+	CTX_DATA_BEGIN (C, Object *, ob_slc, selected_editable_objects)
+	{
+		//if the selected isn't the active object
+		if (ob_act != ob_slc) {
+
+			if (from_active == TO_ACTIVE) {
+
+				//if many objects were selected within this mode ... we should copy only from the first
+				//notice that ob_slc priority isn't set by order of selection!
+				if (transfer_first_to_act == true) {
+					transfer_first_to_act = false;
+
+					if (!ED_mesh_vertex_color_transfer(ob_act, ob_slc, C, scene, op)) {
+						fail++;
+					}
+				}
+			}
+
+			else {		//copy from the active to all the other selected
+				if (!ED_mesh_vertex_color_transfer(ob_slc, ob_act, C, scene, op)) {
+					fail++;
+				}
+			}
+		}
+	}
+
+	////ported from transfer weights
+	/* Event notifiers for correct display of data.*/
+	DAG_id_tag_update(&ob_slc->id, OB_RECALC_DATA);
+	WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob_slc);
+	WM_event_add_notifier(C, NC_GEOM | ND_DATA, ob_slc->data);
+
+	CTX_DATA_END;
+
+	if (fail != 0) {
+		return OPERATOR_CANCELLED;
+	}
+	else {
+		return OPERATOR_FINISHED;
+	}
+}
+
+void MESH_OT_vertex_color_transfer_new(wmOperatorType *ot)
+{
+	/* identifiers */
+	ot->name = "Transfer Color (new)";
+	ot->idname = "MESH_OT_vertex_color_transfer_new";
+	ot->description = "Transfer vertex colors to the selected objects";
+
+	/* api callbacks */
+	ot->poll = layers_poll;			//don't know how to edit this yet!!
+	ot->exec = vertex_color_transfer_exec;
+
+	/* flags */
+	ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;	//not revised!!
+
+	/* properties */
+	RNA_def_boolean(ot->srna, "rel_to_target", false,
+	                "Relative to target", "select this if you want the transfer to be relative to the target");
+	RNA_def_enum(ot->srna, "replace_mode", replace_mode_item, 2,
+	             "Replace/Append", "define which groups to move");
+	RNA_def_enum(ot->srna, "from_to_active", from_to_active, 2, "From/To active object",
+	             "Choose the transfer direction");
+	RNA_def_boolean(ot->srna, "use_tol", false, "Use Tolerance",
+	                "use a tolerance less than infinity to search for the nearest source faces");
+	RNA_def_float(ot->srna, "tol", 1, 0, FLT_MAX, "Tolerance",
+	              "Overwrite the search area to be a value other than infinity; useful for partial transfer", 0, 1000);
+	RNA_def_enum(ot->srna, "transfer_mode", transfer_mode_item, 1,
+	             "index, topology or interpolate", "define which groups to move");
 }
 
 /* *** CustomData clear functions, we need an operator for each *** */

@@ -115,6 +115,11 @@ class VIEW3D_PT_tools_objectmode(View3DPanel, Panel):
 
         draw_gpencil_tools(context, layout)
 
+        col.operator("object.shape_key_transfer_new", text="Transfer Shapekeys (new)")
+        col.operator("mesh.uv_transfer_new", text="Transfer UVs (new)")
+        col.operator("mesh.vertex_color_transfer_new", text="Transfer Colors (new)")
+        col.operator("object.vgroup_transfer_new", text="Transfer Vertex Groups (new)")
+
 
 class VIEW3D_PT_tools_rigidbody(View3DPanel, Panel):
     bl_context = "objectmode"

@@ -287,6 +287,187 @@ LinkNode *BM_mesh_calc_path_edge(
 	return path;
 }
 
+/*
+static float edgetag_cut_cost2(BMEdge *e1, BMEdge *e2, BMVert *v, BMEdge *e_src, BMEdge *e_dst)
+{
+	if (((e1->head.index == e_src->head.index) && (e2->head.index == e_dst->head.index)))
+//	    || ((e2->head.index == e_src->head.index) && (e1->head.index == e_dst->head.index)))
+		return FLT_MAX;
+
+	else {
+		BMVert *v1 = BM_edge_other_vert(e1, v);
+		BMVert *v2 = BM_edge_other_vert(e2, v);
+		return step_cost_3_v3(v1->co, v->co, v2->co);
+	}
+}
+*/
+
+static void edgetag_add_adjacent2(Heap *heap, BMEdge *e1, BMEdge **edges_prev, float *cost, const bool use_length/*,
+                                  BMEdge *e_src, BMEdge *e_dst*/)
+{
+	BMIter viter;
+	BMVert *v;
+
+	BMIter eiter;
+	BMEdge *e2;
+
+	const int e1_index = BM_elem_index_get(e1);
+
+	BM_ITER_ELEM (v, &viter, e1, BM_VERTS_OF_EDGE) {
+		// This condition eliminates the search from looking back (for the first edge) on pre-discovered edges
+		// and it could be generalized but 1) that's not needed for the current loop searching, 2) we need to be careful
+		// about when to re-disable the BM_ELEM_TAG at replacing with the less cost edge!
+		if (BM_elem_flag_test(v, BM_ELEM_TAG)) {
+			continue;
+		}
+		BM_ITER_ELEM (e2, &eiter, v, BM_EDGES_OF_VERT) {
+			if (!BM_elem_flag_test(e2, BM_ELEM_TAG)) {
+				/* we know 'e2' is not visited, check it out! */
+				const int e2_index = BM_elem_index_get(e2);
+				const float cost_cut = use_length ? edgetag_cut_cost(e1, e2, v) : 1.0f;
+				const float cost_new = cost[e1_index] + cost_cut;
+//				float cost_cut;
+//				float cost_new;
+
+				/*
+				if (use_length) {
+					edgetag_cut_cost2(e1, e2, v, e_src, e_dst);
+				}
+
+				else {
+					if ((e1->head.index == e_src->head.index) && (e2->head.index == e_dst->head.index)) {
+						cost_cut = FLT_MAX;
+					}
+
+					else cost_cut = 1.0f;
+				}
+*/
+
+				if (cost[e2_index] > cost_new) {
+					cost[e2_index] = cost_new;
+					edges_prev[e2_index] = e1;
+					BLI_heap_insert(heap, cost_new, e2);
+				}
+			}
+		}
+	}
+}
+
+///shall return all the available looping paths from candidate edge_table given only the source edge!
+LinkNode *BM_mesh_calc_path_edge2(
+        BMesh *bm, BMEdge *e_src, bool *ind_e_table, const bool use_length, void *user_data,
+        bool (*filter_fn)(BMEdge *, void *user_data))
+{
+	LinkNode *path = NULL;
+	/* BM_ELEM_TAG flag is used to store visited edges */
+	BMEdge *e;
+	BMIter eiter;
+	Heap *heap;
+	float *cost;
+	BMEdge **edges_prev;
+	int i, totedge;
+
+	BMEdge *e_dst;
+	BMVert *v;
+	BMIter viter;
+
+	/* note, would pass BM_EDGE except we are looping over all edges anyway */
+	BM_mesh_elem_index_ensure(bm, BM_VERT /* | BM_EDGE */);
+
+	BM_ITER_MESH_INDEX (e, &eiter, bm, BM_EDGES_OF_MESH, i) {
+		if (filter_fn(e, user_data)) {
+			BM_elem_flag_disable(e, BM_ELEM_TAG);
+
+			//only those verts shall be tested later! so we don't care about the verts surrounding other edges
+			BM_ITER_ELEM (v, &viter, e, BM_VERTS_OF_EDGE) {
+				BM_elem_flag_disable(v, BM_ELEM_TAG);
+			}
+		}
+		else {
+			BM_elem_flag_enable(e, BM_ELEM_TAG);
+		}
+
+		BM_elem_index_set(e, i); /* set_inline */
+	}
+
+	bm->elem_index_dirty &= ~BM_EDGE;
+
+	/* alloc */
+	totedge = bm->totedge;
+	cost = MEM_mallocN(sizeof(*cost) * totedge, "SeamPathCost");
+//	edges_prev = MEM_mallocN(sizeof(*edges_prev) * totedge, "SeamPathPrevious");
+	edges_prev = MEM_callocN(sizeof(*edges_prev) * totedge, "SeamPathPrevious");
+
+	//first time we'll try all the vertices around the first v of the edge!
+	///extend it to use e_src->v2 as well!!
+	//that won't be of any help for now ... as our goal is finding a single path not all the
+	//available paths!
+
+	BM_elem_flag_enable(e_src->v1, BM_ELEM_TAG);
+	BM_elem_flag_disable(e_src->v2, BM_ELEM_TAG);
+
+	//we'll loop till we find an edge in the table ... we're sure in previous that one exists
+	BM_ITER_ELEM (e_dst, &eiter, e_src->v1, BM_EDGES_OF_VERT) {
+		// an edge that we shouldn't pass by Or the source is the same edge as the dst
+		if ((ind_e_table[e_dst->head.index] == false) || (e_dst->head.index == e_src->head.index)) {
+			continue;
+		}
+//		memset(*edges_prev, '\0', sizeof(*edges_prev) * tot_edge);
+
+		//set the costs to a very high float
+		fill_vn_fl(cost, totedge, 1e20f);
+
+		/*
+		 * Arrays are now filled as follows:
+		 *
+		 * As the search continues, prevedge[n] will be the previous edge on the shortest
+		 * path found so far to edge n. BM_ELEM_TAG is used to tag elements we have visited,
+		 * cost[n] will contain the length of the shortest
+		 * path to edge n found so far, Finally, heap is a priority heap which is built on the
+		 * the same data as the cost array, but inverted: it is a worklist of edges prioritized
+		 * by the shortest path found so far to the edge.
+		 */
+
+		/* regular dijkstra shortest path, but over edges instead of vertices */
+
+		// we shall now enforce the search to skip adding the dst as the second edge!
+
+		// New heap
+		heap = BLI_heap_new();
+		// Insert the first element with a cost of zero
+		BLI_heap_insert(heap, 0.0f, e_src);
+		cost[BM_elem_index_get(e_src)] = 0.0f;
+
+		while (!BLI_heap_is_empty(heap)) {
+			// Pop the top node of the heap! (e_src for the first loop)
+			e = BLI_heap_popmin(heap);
+
+			// If it was the e_dst ... break! we found it ^_^
+			if (e == e_dst)
+				break;
+
+			// If it wasn't visited, mark as visited ...
+			if (!BM_elem_flag_test(e, BM_ELEM_TAG)) {
+				BM_elem_flag_enable(e, BM_ELEM_TAG);
+				// And add adjacent to the popped element
+				edgetag_add_adjacent2(heap, e, edges_prev, cost, use_length);
+			}
+		}
+
+		if (e == e_dst) {
+			do {
+				BLI_linklist_prepend(&path, e);
+			} while ((e = edges_prev[BM_elem_index_get(e)]));
+		}
+		break;
+	}
+	BLI_heap_free(heap, NULL);
+	MEM_freeN(edges_prev);
+	MEM_freeN(cost);
+
+	return path;
+}
+
 
 
 /* -------------------------------------------------------------------- */

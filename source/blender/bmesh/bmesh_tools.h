@@ -42,6 +42,7 @@ extern "C" {
 #include "tools/bmesh_edgesplit.h"
 #include "tools/bmesh_path.h"
 #include "tools/bmesh_triangulate.h"
+#include "tools/bmesh_data_transfer.h"
 
 #ifdef __cplusplus
 }

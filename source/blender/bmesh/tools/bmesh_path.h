@@ -35,6 +35,9 @@ struct LinkNode *BM_mesh_calc_path_edge(
         BMesh *bm, BMEdge *e_src, BMEdge *e_dst, const bool  use_length,
         void *user_data, bool (*filter_fn)(BMEdge *, void *));
 
+struct LinkNode *BM_mesh_calc_path_edge2(BMesh *bm, BMEdge *e_src, bool *ind_e_table, const bool  use_length,
+                                         void *user_data, bool (*filter_fn)(BMEdge *, void *user_data));
+
 struct LinkNode *BM_mesh_calc_path_face(
         BMesh *bm, BMFace *f_src, BMFace *f_dst, const bool  use_length,
         void *user_data, bool (*test_fn)(BMFace *, void *));

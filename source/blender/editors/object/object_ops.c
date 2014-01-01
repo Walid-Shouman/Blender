@@ -202,6 +202,7 @@ void ED_operatortypes_object(void)
 	WM_operatortype_append(OBJECT_OT_vertex_weight_set_active);
 	WM_operatortype_append(OBJECT_OT_vertex_weight_normalize_active_vertex);
 	WM_operatortype_append(OBJECT_OT_vertex_weight_copy);
+	WM_operatortype_append(OBJECT_OT_vgroup_transfer_new);
 
 	WM_operatortype_append(OBJECT_OT_vertex_warp);
 
@@ -218,6 +219,7 @@ void ED_operatortypes_object(void)
 	WM_operatortype_append(OBJECT_OT_shape_key_retime);
 	WM_operatortype_append(OBJECT_OT_shape_key_mirror);
 	WM_operatortype_append(OBJECT_OT_shape_key_move);
+	WM_operatortype_append(OBJECT_OT_shape_key_transfer_new);
 
 	WM_operatortype_append(LATTICE_OT_select_all);
 	WM_operatortype_append(LATTICE_OT_select_more);

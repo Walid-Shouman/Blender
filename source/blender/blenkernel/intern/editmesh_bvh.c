@@ -430,3 +430,71 @@ BMVert *BKE_bmbvh_find_vert_closest(BMBVHTree *bmtree, const float co[3], const 
 
 	return NULL;
 }
+
+/* BKE_bmbvh_find_face_closest */
+
+struct FaceSearchUserData {
+	/* from the bmtree */
+	const BMLoop *(*looptris)[3];
+	const float (*cos_cage)[3];
+
+	/* from the hit */
+	float maxdist;
+};
+
+static void bmbvh_find_face_closest_cb(void *userdata, int index, const float co[3], BVHTreeNearest *hit)
+{
+	struct FaceSearchUserData *bmcb_data = userdata;	//get the bmcb data from the given userdata
+	const BMLoop **ltri = bmcb_data->looptris[index];	//the triangle should point at the gvn index of the gvn data
+	const float maxdist = bmcb_data->maxdist;			//get the maxdist from the given data
+	float dist;
+
+	const float *tri_cos[3];
+
+	float ltri_mid[3];
+
+	bmbvh_tri_from_face(tri_cos, ltri, bmcb_data->cos_cage);	//get the coordinates of each triangle
+
+	mid_v3_v3v3v3(ltri_mid, ltri[0]->v->co, ltri[1]->v->co, ltri[2]->v->co);
+	dist = len_squared_v3v3(co, ltri_mid);
+
+	if (dist < hit->dist && dist < maxdist) {		//each time the hit is updated so we're sure that only the best of the 3 will be selected
+		copy_v3_v3(hit->co, ltri_mid);
+		/* XXX, normal ignores cage */
+		copy_v3_v3(hit->no, ltri[0]->f->no);		//any of the three loops shall work
+		hit->dist = dist;
+		hit->index = index;
+	}
+}
+
+BMFace *BKE_bmbvh_find_face_closest(BMBVHTree *bmtree, const float co[3], const float maxdist)
+{
+	BVHTreeNearest hit;
+	struct FaceSearchUserData bmcb_data;
+	float maxdist_sq = maxdist * maxdist;
+
+	//avoid overlap
+	if ((maxdist > 1) && (maxdist_sq < maxdist))
+		maxdist_sq = FLT_MAX;
+
+	else if ((maxdist < 0) && (maxdist_sq < (-1 * maxdist)))
+		maxdist_sq = FLT_MAX;
+
+	//is that ok?
+	if (bmtree->cos_cage) BLI_assert(!(bmtree->bm->elem_index_dirty & BM_FACE));
+
+	hit.dist = maxdist_sq;
+	hit.index = -1;
+
+	bmcb_data.looptris = (const BMLoop *(*)[3])bmtree->looptris;
+	bmcb_data.cos_cage = (const float (*)[3])bmtree->cos_cage;
+	bmcb_data.maxdist = maxdist_sq;
+
+	BLI_bvhtree_find_nearest(bmtree->tree, co, &hit, bmbvh_find_face_closest_cb, &bmcb_data);
+	if (hit.index != -1) {
+		BMLoop **ltri = bmtree->looptris[hit.index];
+		return ltri[0]->f;								//any loop would be ok
+	}
+
+	return NULL;
+}

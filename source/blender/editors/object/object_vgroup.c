@@ -83,6 +83,8 @@
 
 #include "UI_resources.h"
 
+#include "bmesh_tools.h"
+
 #include "object_intern.h"
 
 /************************ Exported Functions **********************/
@@ -200,6 +202,225 @@ bool ED_vgroup_data_create(ID *id)
 	else {
 		return false;
 	}
+}
+
+static EnumPropertyItem replace_mode_item[] = {
+    {REPLACE_ACTIVE_GROUP,
+	 "REPLACE_ACTIVE_GROUP", 0, "Active", "Overwrite active group only"},
+    {REPLACE_ENOUGH_GROUPS,
+	 "REPLACE_ENOUGH_GROUPS", 0, "Enough", "Overwrite source groups only as needed"},
+    {REPLACE_ALL_GROUPS,
+	 "REPLACE_ALL_GROUPS", 0, "All", "Overwrite all groups"},
+    {APPEND_GROUPS,
+	 "APPEND_GROUPS", 0, "Append", "Add groups without overwriting"},
+	{0, NULL, 0, NULL, NULL}
+};
+
+typedef enum FromToActive {
+	FROM_ACTIVE = 1,
+	TO_ACTIVE = 2
+} FromToActive;
+
+static EnumPropertyItem from_to_active[] = {
+    {FROM_ACTIVE,
+	 "FROM_ACTIVE", 0, "From active", "Transfer to different objects"},
+    {TO_ACTIVE,
+	 "TO_ACTIVE", 0, "To active", "Better to faster tweek the output"},
+    {0, NULL, 0, NULL, NULL}
+};
+
+static EnumPropertyItem transfer_mode_item[] = {
+    {TRANSFER_BY_INDEX,
+	 "TRANSFER_BY_INDEX", 0, "By index", "copy between identical indices meshes"},
+    {TRANSFER_BY_TOPOLOGY,
+	 "TRANSFER_BY_TOPOLOGY", 0, "By topology", "use if the same topology with different indices"},
+    {TRANSFER_BY_INTERPOLATION,
+	 "TRANSFER_BY_INTERPOLATION", 0, "By interpolation", "interpolate for different topologies"},
+	{0, NULL, 0, NULL, NULL}
+};
+
+static bool ED_mesh_vgroup_transfer(Object *ob_dst, Object *ob_src, bContext *UNUSED(C), Scene *UNUSED(scene), wmOperator * op)
+{
+	Mesh *me_dst, *me_src;
+	BMesh *bm_dst, *bm_src;
+
+	bool relative_to_target = RNA_boolean_get(op->ptr, "rel_to_target");
+	bool use_tolerance = RNA_boolean_get(op->ptr, "use_tol");
+	float tolerance = RNA_float_get(op->ptr, "tol");
+	ReplaceGroupMode replace_mode = RNA_enum_get(op->ptr, "replace_mode");
+	bDeformGroup *dg_dst, *dg_src;
+	PropertyRNA *tolerance_prop = RNA_struct_find_property(op->ptr, "tol");
+	TransferMode transfer_mode = RNA_enum_get(op->ptr, "transfer_mode");
+
+	int num_src_lay, num_dst_lay;
+
+	int i;
+
+	float tmp_mat[4][4];
+
+	int active_dst, active_src;
+	char *src_name;
+
+	struct ReplaceLayerInfo replace_info;
+
+	invert_m4_m4(ob_src->imat, ob_src->obmat);
+	mul_m4_m4m4(tmp_mat, ob_src->imat, ob_dst->obmat);
+
+	if(use_tolerance == false)
+		RNA_def_property_flag(tolerance_prop, PROP_HIDDEN);
+	else
+		RNA_def_property_clear_flag(tolerance_prop, PROP_HIDDEN);
+
+	me_dst = ob_dst->data;
+	me_src = ob_src->data;
+
+	CustomData_add_layer(&me_dst->vdata, CD_MDEFORMVERT, 1, NULL, me_dst->totvert);
+	CustomData_add_layer(&me_src->vdata, CD_MDEFORMVERT, 1, NULL, me_src->totvert);
+
+	num_src_lay = BLI_countlist(&ob_src->defbase);
+	num_dst_lay = BLI_countlist(&ob_dst->defbase);
+
+	if (num_src_lay < 1) {
+		//the source should have deformvert layers
+		BKE_report(op->reports, RPT_ERROR,
+		           "Transfer failed no vertex groups were found (source mesh should have -at least- 1 Vertex group)");
+
+		return false;
+	}
+
+	if (replace_mode == REPLACE_ENOUGH_GROUPS) {
+
+		//add layers as needed
+		i = num_src_lay - num_dst_lay;
+		while (i > 0) {
+			ED_vgroup_add(ob_dst);
+			i--;
+		}
+
+		dg_src = ob_src->defbase.first;
+		dg_dst = ob_dst->defbase.first;
+
+		//copy the names
+		for (i = 0; i < num_src_lay; ++i) {
+			src_name = dg_src->name;
+			BLI_strncpy(dg_dst->name, dg_src->name, sizeof(dg_src->name));
+
+			dg_dst = dg_dst->next;
+			dg_src = dg_src->next;
+		}
+
+		replace_info.src_lay_start = 0;
+		replace_info.src_lay_end = num_src_lay - 1;
+		replace_info.dst_lay_start = 0;
+		replace_info.dst_lay_end = num_src_lay - 1;
+	}
+
+	//we'll tell the copy function to start copying from # of source layers from the end of the dst layers
+	else if (replace_mode == APPEND_GROUPS)
+	{
+		dg_src = ob_src->defbase.first;
+		dg_dst = ob_dst->defbase.last;
+
+		for (i = 0; i < num_src_lay; ++i) {
+			src_name = dg_src->name;
+			//append vertex group with the src names
+			ED_vgroup_add_name(ob_dst, src_name);
+
+			//we could eliminate that check if layers are ordered according to the last (ie: instead of by name)
+			dg_dst = (dg_dst == NULL) ? ob_dst->defbase.last : dg_dst->next;
+			dg_src = dg_src->next;
+		}
+
+		replace_info.src_lay_start = 0;
+		replace_info.src_lay_end = num_src_lay - 1;
+		replace_info.dst_lay_start = num_dst_lay;
+		replace_info.dst_lay_end = num_dst_lay + num_src_lay - 1;
+	}
+
+	else if (replace_mode == REPLACE_ALL_GROUPS)
+	{
+		for (dg_dst = ob_dst->defbase.first; dg_dst; dg_dst = dg_dst->next) {
+			ED_vgroup_delete(ob_dst, dg_dst);
+		}
+
+		//after removing all the layers we'll need to re-add the CD_MDEFORMVERT
+		CustomData_add_layer(&me_dst->vdata, CD_MDEFORMVERT, 1, NULL, me_dst->totvert);
+
+		dg_src = ob_src->defbase.first;
+
+		for (i = 0; i < num_src_lay; ++i) {
+			src_name = dg_src->name;
+			//add vertex group with the src name
+			ED_vgroup_add_name(ob_dst, src_name);
+
+			dg_src = dg_src->next;
+		}
+
+		replace_info.src_lay_start = 0;
+		replace_info.src_lay_end = num_src_lay - 1;
+		replace_info.dst_lay_start = 0;
+		replace_info.dst_lay_end = num_src_lay - 1;
+	}
+
+	else if (replace_mode == REPLACE_ACTIVE_GROUP) {
+		//find the source active layer
+		active_src = ob_src->actdef;
+		active_dst = ob_dst->actdef;
+
+		dg_src = BLI_findlink(&ob_src->defbase, active_src - 1);
+		dg_dst = BLI_findlink(&ob_dst->defbase, active_dst - 1);
+
+		if (num_dst_lay == 0) {	//empty destination
+			src_name = dg_src->name;
+			ED_vgroup_add_name(ob_dst, src_name);
+
+			active_dst++;
+			dg_dst = BLI_findlink(&ob_dst->defbase, active_dst - 1);
+		}
+
+		else {	//destination has layers (accordingly there's a selected layer)
+			src_name = dg_src->name;
+			BLI_strncpy(dg_dst->name, dg_src->name, sizeof(dg_src->name));
+		}
+
+		//to transfer a single layer add it to the start and end
+		replace_info.src_lay_start = active_src - 1;
+		replace_info.src_lay_end = replace_info.src_lay_start;
+		replace_info.dst_lay_start = active_dst - 1;	//fixing the indices
+		replace_info.dst_lay_end = replace_info.dst_lay_start;
+	}
+
+	//this way we're disabling the feature of layer selection till we get a CD function that provides a group-based
+	//access to CD_MDEFORMVERT (ie: by customdata_layer_set_n), or may be a generalization to the CD_MDEFORMVERT
+	//representation to be split on layers except being saved in one layer
+	replace_info.src_lay_start = CustomData_get_active_layer(&me_src->vdata, CD_MDEFORMVERT);
+	replace_info.src_lay_end = replace_info.src_lay_start;
+	replace_info.dst_lay_start = CustomData_get_active_layer(&me_dst->vdata, CD_MDEFORMVERT);
+	replace_info.dst_lay_end = replace_info.dst_lay_start;
+
+
+	//allocate space
+	bm_src = BM_mesh_create(&bm_mesh_allocsize_default);
+	bm_dst = BM_mesh_create(&bm_mesh_allocsize_default);
+
+	BM_mesh_bm_from_me(bm_src, me_src, TRUE, true, 0);	//TRUE -> should transfer shapekeys too!!
+	BM_mesh_bm_from_me(bm_dst, me_dst, TRUE, true, 0);
+
+	if (!BM_mesh_data_copy(bm_src, bm_dst, &replace_info, CD_MDEFORMVERT, transfer_mode, relative_to_target, tmp_mat,
+	                       use_tolerance, tolerance)) {
+		return false;
+	}
+
+	//transfer the BMesh back to Mesh
+	BM_mesh_bm_to_me(bm_src, me_src, FALSE);
+	BM_mesh_bm_to_me(bm_dst, me_dst, TRUE);
+
+	//free the BMesh
+	BM_mesh_free(bm_src);
+	BM_mesh_free(bm_dst);
+
+	return true;
+
 }
 
 /**
@@ -4650,4 +4871,86 @@ void OBJECT_OT_vertex_weight_copy(wmOperatorType *ot)
 
 	/* flags */
 	ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static int vgroup_transfer_exec(bContext *C, wmOperator * op)
+{
+	Scene *scene = CTX_data_scene(C);
+	Object *ob_act = CTX_data_active_object(C);
+	int fail = 0;
+
+	bool transfer_first_to_act = true;
+
+	FromToActive from_active = RNA_enum_get(op->ptr, "from_to_active");
+
+	/* Macro to loop through selected objects.*/
+	CTX_DATA_BEGIN (C, Object *, ob_slc, selected_editable_objects)
+	{
+		//if the selected isn't the active object
+		if (ob_act != ob_slc) {
+
+			if (from_active == TO_ACTIVE) {
+
+				//if many objects were selected within this mode ... we should copy only from the first
+				//notice that ob_slc priority isn't set by order of selection!
+				if (transfer_first_to_act == true) {
+					transfer_first_to_act = false;
+
+					if (!ED_mesh_vgroup_transfer(ob_act, ob_slc, C, scene, op)) {
+						fail++;
+					}
+				}
+			}
+
+			else {		//copy from the active to all the other selected
+				if (!ED_mesh_vgroup_transfer(ob_slc, ob_act, C, scene, op)) {
+					fail++;
+				}
+			}
+		}
+}
+
+	////ported from transfer weights
+	/* Event notifiers for correct display of data.*/
+	DAG_id_tag_update(&ob_slc->id, OB_RECALC_DATA);
+	WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob_slc);
+	WM_event_add_notifier(C, NC_GEOM | ND_DATA, ob_slc->data);
+
+	CTX_DATA_END;
+
+	if (fail != 0) {
+		return OPERATOR_CANCELLED;
+	}
+	else {
+		return OPERATOR_FINISHED;
+	}
+}
+
+void OBJECT_OT_vgroup_transfer_new(wmOperatorType *ot)
+{
+	/* identifiers */
+	ot->name = "Transfer Vertex Groups (new)";
+	ot->idname = "OBJECT_OT_vgroup_transfer_new";
+	ot->description = "Transfer vertex groups to the selected objects";
+
+	/* api callbacks */
+	ot->poll = vertex_group_mesh_supported_poll;			//don't know how to edit this yet!!
+	ot->exec = vgroup_transfer_exec;
+
+	/* flags */
+	ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;	//not revised!!
+
+	/* properties */
+	RNA_def_boolean(ot->srna, "rel_to_target", false,
+	                "Relative to target", "select this if you want the transfer to be relative to the target");
+	RNA_def_boolean(ot->srna, "use_tol", false, "Use Tolerance",
+	                "use a tolerance less than infinity to search for the nearest source faces");
+	RNA_def_float(ot->srna, "tol", 1, 0, FLT_MAX, "Tolerance",
+	              "Overwrite the search area to be a value other than infinity; useful for partial transfer", 0, 1000);
+	RNA_def_enum(ot->srna, "replace_mode", replace_mode_item, 2,
+	             "Replace/Append", "define which groups to move");
+	RNA_def_enum(ot->srna, "from_to_active", from_to_active, 2, "From/To active object",
+	             "Choose the transfer direction");
+	RNA_def_enum(ot->srna, "transfer_mode", transfer_mode_item, 1,
+	             "index, topology or interpolate", "define which groups to move");
 }

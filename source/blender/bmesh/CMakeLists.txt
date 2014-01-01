@@ -140,6 +140,8 @@ set(SRC
 	tools/bmesh_triangulate.h
 	tools/bmesh_wireframe.c
 	tools/bmesh_wireframe.h
+	tools/bmesh_data_transfer.c
+	tools/bmesh_data_transfer.h
 
 	bmesh_class.h
 
