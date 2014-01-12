@@ -181,6 +181,23 @@ bool BM_mesh_data_copy(BMesh *bm_src, BMesh* bm_dst, const struct ReplaceLayerIn
 
 //--------------index transfer definitions---------
 
+/**
+ * @brief BM_mesh_cd_transfer_mapped
+ * Given source elements -@param array_src-
+ *		and dest elements -@param array_dst-, copy the CD of type @param layer_type from @param cd_src to @param cd_dst
+ * Layers to be copied must be given as the @param replace_info
+ * Each elem in @param array_dst corresponds to the elem in @param array_src that has the same index
+ *
+ * @param cd_src			source cd layer
+ * @param array_src			array of source elements
+ * @param array_src_count	number of provided source elements
+ * @param cd_dst			destination cd layer
+ * @param array_dst			array of destination elements
+ * @param array_dst_count	number of provided destination elements
+ * @param layer_type		CD layer type
+ * @param replace_info		layers to replace
+ */
+
 static void BM_mesh_cd_transfer_array(CustomData *cd_src, BMElem **array_src, int array_src_count,
                                       CustomData *cd_dst, BMElem **array_dst, int array_dst_count,
                                       const int layer_type, const struct ReplaceLayerInfo *replace_info)
@@ -213,6 +230,19 @@ static void BM_mesh_cd_transfer_array(CustomData *cd_src, BMElem **array_src, in
 		printf("%s: %d != %d\n", __func__, array_src_count, array_dst_count);
 	}
 }
+
+/**
+ * @brief BM_mesh_transfer_mapped
+ * Transfer CD layer of type @param layer_type between @param htype elements from the @param bm_src to @param bm_dst
+ * Similar number of elements in the source and destination is a must
+ * The transfer takes only the indices into consideration (unwanted results would happen if order wasn't maintained)
+ *
+ * @param bm_src			source bmesh
+ * @param bm_dst			destination bmesh
+ * @param htype				element type
+ * @param layer_type		CD layer type
+ * @param replace_info		determines the layer-group mapping for the transfer
+ */
 
 static void BM_mesh_transfer_aligned(BMesh *bm_src, BMesh *bm_dst, const char htype, const int layer_type,
                                      const struct ReplaceLayerInfo *replace_info)
@@ -272,6 +302,25 @@ static void BM_mesh_transfer_aligned(BMesh *bm_src, BMesh *bm_dst, const char ht
 
 //--------------topology transfer definitions---------
 
+/**
+ * @brief BM_mesh_cd_transfer_mapped
+ * Given the mapping -@param index_mapping- between source elements -@param array_src-
+ *		and dest elements -@param array_dst-, copy the CD of type @param layer_type from @param cd_src to @param cd_dst
+ * Layers to be copied must be given as the @param replace_info
+ *
+ * @param cd_src			source cd layer
+ * @param array_src			array of source elements
+ * @param array_src_count	number of provided source elements
+ * @param cd_dst			destination cd layer
+ * @param array_dst			array of destination elements
+ * @param array_dst_count	number of provided destination elements
+ * @param layer_type		CD layer type
+ * @param replace_info		layers to replace
+ * @param index_mapping		mapping between source and destination elements
+ *
+ * Keep in sync with BM_mesh_cd_transfer_array
+ */
+
 static void BM_mesh_cd_transfer_mapped(CustomData *cd_src, BMElem **array_src, int array_src_count,
                                 CustomData *cd_dst, BMElem **array_dst, int array_dst_count,
                                 const int layer_type, const struct ReplaceLayerInfo *replace_info,
@@ -311,6 +360,21 @@ static void BM_mesh_cd_transfer_mapped(CustomData *cd_src, BMElem **array_src, i
 		printf("%s: %d != %d\n", __func__, array_src_count, array_dst_count);
 	}
 }
+
+/**
+ * @brief BM_mesh_transfer_mapped
+ * Transfer CD layer of type @param layer_type between @param htype elements from the @param bm_src to @param bm_dst
+ * Similar number of elements in the source and destination is a must
+ * It's OK if the elements weren't in order
+ *
+ * @param bm_src			source bmesh
+ * @param bm_dst			destination bmesh
+ * @param htype				element type
+ * @param layer_type		CD layer type
+ * @param replace_info		determines the layer-group mapping for the transfer
+ *
+ * Keep in sync with BM_mesh_transfer_aligned
+ */
 
 static void BM_mesh_transfer_mapped(BMesh *bm_src, BMesh *bm_dst, const char htype, const int layer_type,
                                      const struct ReplaceLayerInfo *replace_info)
@@ -403,6 +467,20 @@ static void BM_mesh_transfer_mapped(BMesh *bm_src, BMesh *bm_dst, const char hty
 }
 
 //---------------helping functions definitions-----------
+
+/**
+ * @brief BM_mesh_mapping
+ * Given a certain element type return a mapping pointer for each element in the destination to an element in the source
+ * The pointer would have the same number of elements as the destination
+ * This is considered 1(destination):N(source) mapping of the elements
+ *
+ * @param bm_src	source bmesh
+ * @param bm_dst	destination bmesh
+ * @param htype		element type to map
+ * @return			mapping pointer
+ *
+ * Currently supported types are BMVert and BMLoop
+ */
 
 static void *BM_mesh_mapping(BMesh *bm_src, BMesh *bm_dst, const char htype)
 {
@@ -508,6 +586,27 @@ static void set_loop_indices(BMesh *bm)
 	}
 }
 
+/**
+ * @brief BM_transform_index_mapping
+ * Uses a prev-mapping @param index_mapping_in between certain elements type @param htype_from to get a new-mapping of
+ * the type @param htype_to,
+ * Requires the mapping elements @param array_dst to be given, in the same order as the index_mapping_in,
+ * Used mainly to ransform from face/vert/edge mapping to loop mapping
+ *
+ * @param bm_src				source bmesh we shall fetch the loops from
+ * @param array_dst				given array of destination bmesh elements
+ * @param array_dst_count		cound of the given array
+ * @param index_mapping_in		prev-mapping between @param array_dst and the @param bm_src's elements
+ * @param htype_from			type of the @param array_dst
+ * @param htype_to				type of mapping we seek
+ * @return index_mapping_out	new-mapping between the destination's and the source's @param htype_to elements
+ *
+ * Currently supported conversions are
+ *	BM_VERT to BM_LOOP
+ * TODO
+ *	support BM_EDGE and BM_FACE to BM_LOOP
+ */
+
 static int *BM_transform_index_mapping(BMesh *bm_src, BMElem **array_dst, int array_dst_count, int *index_mapping_in,
                                        int htype_from, int htype_to)
 {
@@ -565,6 +664,15 @@ static int *BM_transform_index_mapping(BMesh *bm_src, BMElem **array_dst, int ar
 	return index_mapping_out;
 }
 
+/**
+ * @brief BM_vert_find_best_tan_match_loop
+ * given a vertex and a loop find the the best vert's loop that matches the given loop's orientation
+ *
+ * @param v_src		given vert
+ * @param l_dst		any loop
+ * @return l		the best matching vert's loop to the given loop
+ */
+
 static BMLoop* BM_vert_find_best_tan_match_loop(BMVert *v_src, BMLoop *l_dst) {
 
 	BMLoop *l, *l_src;
@@ -597,6 +705,16 @@ static BMLoop* BM_vert_find_best_tan_match_loop(BMVert *v_src, BMLoop *l_dst) {
 	return l;
 }
 
+/**
+ * @brief BM_iter_loops_as_array given
+ * fill the array with bmesh's loops, and return the number of those loops
+ *
+ * @param bm		bmesh we would use for the array
+ * @param array		array to be filled
+ * @param len		number of bmesh loops, currently used for sanity checking (may not be needed)
+ * @return i		number of loops filled into the array
+ */
+
 static int BM_iter_loops_as_array(BMesh *bm, BMElem **array, int len)
 {
 	BMLoop *l;
@@ -621,6 +739,15 @@ static int BM_iter_loops_as_array(BMesh *bm, BMElem **array, int len)
 }
 
 #if 0
+
+/**
+ * @brief BM_face_find_best_tan_match_loop
+ * Given a face @param f_src get the best matching face's loop -@param l- to another loop -@param l_dst-
+ * @param f_src		given face
+ * @param l_dst		any loop
+ * @return l		the best matching face's loop to the given loop
+ */
+
 static BMLoop* BM_face_find_best_tan_match_loop(BMFace *f_src, BMLoop *l_dst) {
 
 	BMLoop *l, *l_src;
