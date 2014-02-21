@@ -128,8 +128,8 @@ bool BM_face_is_normal_valid(const BMFace *f);
 float BM_mesh_calc_volume(BMesh *bm, bool is_signed);
 
 int   BM_mesh_calc_face_groups(BMesh *bm, int *r_groups_array, int (**r_group_index)[2],
-                               BMElemFilterFunc filter_fn, void *user_data,
-                               const char hflag_test, const char htype_step);
+                                   BMElemFilterFunc elem_filter_fn, BMElemsFilterFunc elems_filter_fn, void *user_data,
+                                   const char hflag_test, const char htype_step);
 int   BM_mesh_calc_edge_groups(BMesh *bm, int *r_groups_array, int (**r_group_index)[2],
                                BMElemFilterFunc filter_fn, void *user_data,
                                const char hflag_test);

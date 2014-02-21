@@ -152,7 +152,7 @@ void bmo_recalc_face_normals_exec(BMesh *bm, BMOperator *op)
 
 	int (*group_index)[2];
 	const int group_tot = BM_mesh_calc_face_groups(bm, groups_array, &group_index,
-	                                               bmo_recalc_normal_edge_filter_cb, NULL,
+	                                               bmo_recalc_normal_edge_filter_cb, NULL, NULL,
 	                                               0, BM_EDGE);
 	int i;
 
