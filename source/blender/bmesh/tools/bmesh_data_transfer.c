@@ -542,6 +542,7 @@ static void BM_mesh_cd_transfer_interpolated(CustomData *cd_src, BMElem **array_
 	int dst_lay_end = replace_info->dst_lay_end;
 	int src_lay_start = replace_info->src_lay_start;
 	int src_n, dst_n;
+	int dst_n_offset;
 	int *ele_src_list;
 	float **index_mapping_weights_iter = index_mapping_weights;
 
@@ -570,8 +571,17 @@ static void BM_mesh_cd_transfer_interpolated(CustomData *cd_src, BMElem **array_
 					ptr[k] = CustomData_bmesh_get_n(cd_src, ele_src->head.data, layer_type, src_n);
 				}
 
+				dst_n_offset = CustomData_get_layer_index_n(cd_dst, layer_type, dst_n);
+
+				if (dst_n_offset == -1)
+				{
+					BLI_assert(0);
+					printf("%s: unrecognized CD layer offset\n", __func__);
+					break;
+				}
+
 				CustomData_bmesh_interp_n(cd_dst, ptr, index_mapping_weights_iter[i], NULL, index_mapping_count[i],
-				                          ele_dst->head.data, dst_n);
+				                          ele_dst->head.data, dst_n_offset);
 
 				//better to treat the CD_MLOOPUV as a special case instead of increasing the computation for all the other
 				//layer_types,
