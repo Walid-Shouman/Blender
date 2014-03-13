@@ -54,6 +54,11 @@ typedef enum TransferMode {
 	TRANSFER_BY_INTERPOLATION = 3,
 } TransferMode;
 
+struct HTypeMapping {
+    int htype_from;
+    int htype_to;
+} HTypeMapping;
+
 bool BM_mesh_data_copy(BMesh *bm_src, BMesh* bm_dst, const struct ReplaceLayerInfo *replace_info, int type,
                         TransferMode transfer_mode, bool relative_to_target, float tmp_mat[4][4], bool use_tolerance,
                         float tolerance);
