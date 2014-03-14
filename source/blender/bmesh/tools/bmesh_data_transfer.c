@@ -54,6 +54,7 @@ static void BM_get_loop_coord_list(BMLoop **l_array, float (**r_co_list)[3], int
 static void BM_get_face_loops_as_indices(BMFace *f, int **r_loop_array, int *r_loop_array_len);
 static void BM_get_face_verts_as_indices(BMFace *f, int **r_vert_array, int *r_vert_array_len);
 static void append_index_list(int **out_list, const int out_list_len, int *in_list, const int in_list_len);
+static int *set_group_table(int *groups_array, int (*group_index)[2], int group_tot);
 static bool BM_loops_are_connecting_islands_cb(BMElem *ele1, BMElem *ele2, void *p_cd_loop_uv_offset);
 #if 0
 static void BM_get_face_coord_list(float (**r_co_list)[3], BMFace *f);
@@ -62,7 +63,6 @@ static void BM_get_island_loops_as_indices(BMFace **array_src, int array_src_cou
                                            int *groups_array, int (*group_index)[2], int group_tot,
                                            int **r_loops_of_island_mapping, int *r_loops_of_island_mapping_len);
 #endif
-static int get_island_id(int *groups_array, int (*group_index)[2], int group_tot, int face_index);
 bool BM_mesh_mapping_converter(BMesh *bm_src, BMesh *bm_dst, BMElem **array_dst, int array_dst_len,
                                void *init_index_mapping, void *init_index_mapping_len,
                                struct HTypeMapping *htype_map_src, struct HTypeMapping *htype_map_dst,
@@ -1090,6 +1090,7 @@ static bool bmesh_index_mapping_vert_face_loop_loop(BMesh *bm_src, BMElem **arra
 	int *groups_array;
 	int (*group_index)[2];
 	int group_tot;
+	int *group_table;
 
 	//get all the loops in advance
 	for (i = 0; i < f_array_src_count; i++) {
@@ -1107,6 +1108,7 @@ static bool bmesh_index_mapping_vert_face_loop_loop(BMesh *bm_src, BMElem **arra
 		groups_array = MEM_mallocN(sizeof(*groups_array) * bm_src->totface, "groups_array bmesh_data_transfer.c");
 		group_tot = BM_mesh_calc_face_groups(bm_src, groups_array, &group_index, NULL,
 												 BM_loops_are_connecting_islands_cb, &cd_offset, 0, BM_LOOP);
+		group_table = set_group_table(groups_array, group_index, group_tot);
 
 	}
 
@@ -1126,7 +1128,7 @@ static bool bmesh_index_mapping_vert_face_loop_loop(BMesh *bm_src, BMElem **arra
 		f_dst_index = BM_elem_index_get(l_dst->f);
 		//get the respective island_id
 		if (respect_islands == true) {
-			basic_island_id = get_island_id(groups_array, group_index, group_tot, face_index_mapping[f_dst_index]);
+			basic_island_id = group_table[face_index_mapping[f_dst_index]];
 		}
 
 		//get the cooresponding vertex index
@@ -1147,7 +1149,7 @@ static bool bmesh_index_mapping_vert_face_loop_loop(BMesh *bm_src, BMElem **arra
 
 			//get the respective loop mapping for each loop
 			if (respect_islands == true) {
-				island_id = get_island_id(groups_array, group_index, group_tot, f_src_index);
+				island_id = group_table[f_src_index];
 				if (island_id == basic_island_id) {	//valid face to trasnf. from
 
 					//append the respective verts
@@ -1169,6 +1171,7 @@ static bool bmesh_index_mapping_vert_face_loop_loop(BMesh *bm_src, BMElem **arra
 	if (respect_islands == true) {
 		MEM_freeN(groups_array);
 		MEM_freeN(group_index);
+		MEM_freeN(group_table);
 	}
 
 	for (i = 0; i < f_array_src_count; i++) {
@@ -1551,6 +1554,33 @@ static void append_co_list(float (**r_out_list)[3], const int out_list_len, floa
 }
 #endif
 
+static int *set_group_table(int *groups_array, int (*group_index)[2], int group_tot)
+{
+	int *group_table;
+	int f_ind;
+	int i, j;
+
+	/* tot_faces stored is the same as the len plus the start of the last group*/
+	const int tot_faces = group_index[group_tot - 1][0] + group_index[group_tot - 1][1];
+
+	group_table = MEM_mallocN(sizeof(*group_table) * tot_faces, "group_table bmesh_data_transfer.c");
+
+	for (i = 0; i < group_tot; i++) {
+		const int fg_sta = group_index[i][0];
+		const int fg_len = group_index[i][1];
+
+		for (j =0; j < fg_len; j++) {
+			/* get every face in the group */
+			f_ind = groups_array[fg_sta + j];
+
+			/* add the group number to a faces' lookup */
+			group_table[f_ind] = i;
+		}
+	}
+
+	return group_table;
+}
+
 static bool BM_loops_are_connecting_islands_cb(BMElem *ele1, BMElem *ele2, void *p_cd_loop_uv_offset)
 {
 	BMLoop *l1, *l2, *l1_next, *l2_next;
@@ -1658,45 +1688,6 @@ static void BM_get_island_loops_as_indices(BMFace **array_src, int array_src_cou
 	}
 }
 #endif
-
-//return -1 upon failure
-
-static int get_island_id(int *groups_array, int (*group_index)[2], int group_tot, int face_index)
-{
-	int n = 0;
-	int f_id;
-
-	f_id = groups_array[face_index];
-	if (f_id < 0) {
-		printf("%s: groups_array has a mapping to negative face index!\n", __func__);
-		return -1;
-	}
-
-	while (n < group_tot){
-		int lower_lim = group_index[n][0];
-		int upper_lim = group_index[n][0] + group_index[n][1];
-
-		//get to the next island
-		if (f_id >= upper_lim) {
-			n++;
-		}
-
-		//the sought island
-		else if (f_id >= lower_lim && f_id < upper_lim) {
-			return n;
-		}
-
-		//we surpassed the sought island!
-		else if (f_id < lower_lim) {
-			return -1;
-		}
-	}
-
-	//face not found
-	//groups_index and group_array aren't compatible!
-	BLI_assert(0);
-	return -1;
-}
 
 bool BM_mesh_mapping_converter(BMesh *bm_src, BMesh *bm_dst, BMElem **array_dst, int array_dst_len,
                                void *init_index_mapping, void *init_index_mapping_len,

@@ -2037,18 +2037,19 @@ int BM_mesh_calc_face_groups(BMesh *bm, int *r_groups_array, int (**r_group_inde
 				l_iter = l_first = BM_FACE_FIRST_LOOP(f);
 				do {
 					BMLoop *l_radial_iter = l_iter->radial_next;
-					if ((l_radial_iter != l_iter) &&
-					    ((elems_filter_fn == NULL) || elems_filter_fn((BMElem *)l_iter, (BMElem *)l_radial_iter,
-					                                                  user_data)))
-					{
-						do {
+					/* iterate loops, supporting manifolds */
+					do {
+						if ((l_radial_iter != l_iter) &&
+							((elems_filter_fn == NULL) || elems_filter_fn((BMElem *)l_iter, (BMElem *)l_radial_iter,
+																		  user_data)))
+						{
 							BMFace *f_other = l_radial_iter->f;
 							if (BM_elem_flag_test(f_other, BM_ELEM_TAG) == false) {
 								BM_elem_flag_enable(f_other, BM_ELEM_TAG);
 								STACK_PUSH(stack, f_other);
 							}
-						} while ((l_radial_iter = l_radial_iter->radial_next) != l_iter);
-					}
+						}
+					} while ((l_radial_iter = l_radial_iter->radial_next) != l_iter);
 				} while ((l_iter = l_iter->next) != l_first);
 			}
 		}
