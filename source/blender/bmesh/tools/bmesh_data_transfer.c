@@ -50,22 +50,25 @@
 //---------------helping functions declarations -----------
 static BMLoop* BM_vert_find_best_tan_match_loop(BMVert *v_src, BMLoop *l_dst);
 static int BM_iter_loops_as_array(BMesh *bm, BMElem **array, int len);
-static void BM_get_face_coord_list(float (**r_co_list)[3], BMFace *f);
 static void BM_get_loop_coord_list(BMLoop **l_array, float (**r_co_list)[3], int *loops_map, int len);
 static void BM_get_face_loops_as_indices(BMFace *f, int **r_loop_array, int *r_loop_array_len);
 static void BM_get_face_verts_as_indices(BMFace *f, int **r_vert_array, int *r_vert_array_len);
 static void append_index_list(int **out_list, const int out_list_len, int *in_list, const int in_list_len);
-static void append_co_list(float (**out_list)[3], const int out_list_len, float (*in_list)[3], const int in_list_len);
 static bool BM_loops_are_connecting_islands_cb(BMElem *ele1, BMElem *ele2, void *p_cd_loop_uv_offset);
+#if 0
+static void BM_get_face_coord_list(float (**r_co_list)[3], BMFace *f);
+static void append_co_list(float (**out_list)[3], const int out_list_len, float (*in_list)[3], const int in_list_len);
 static void BM_get_island_loops_as_indices(BMFace **array_src, int array_src_count, int **loops_of_face_mapping,
                                            int *groups_array, int (*group_index)[2], int group_tot,
                                            int **r_loops_of_island_mapping, int *r_loops_of_island_mapping_len);
+#endif
 static int get_island_id(int *groups_array, int (*group_index)[2], int group_tot, int face_index);
-bool BM_mesh_mapping_converter(BMesh *bm_src, BMElem **array_dst, int array_dst_len,void *init_index_mapping,
+bool BM_mesh_mapping_converter(BMesh *bm_src, BMesh *bm_dst, BMElem **array_dst, int array_dst_len,
+                               void *init_index_mapping, void *init_index_mapping_len,
                                struct HTypeMapping *htype_map_src, struct HTypeMapping *htype_map_dst,
                                void *mid_index_mapping, void *mid_index_mapping_len, int respect_islands, int cd_offset);
 static void BM_set_htype_mapping(struct HTypeMapping *htype_map_src, struct HTypeMapping *htype_map_dst,
-                                 int htype_src_from, int htype_src_to, int htype_dst_from, int htype_dst_to);
+                                 int htype_from_src, int htype_from_dst, int htype_to_src, int htype_to_dst);
 static void BM_calculate_weights(BMElem **array_src, BMElem **array_dst, int array_dst_len, int **index_mapping,
                                  int *index_mapping_len, float ***r_index_mapping_weights, int htype);
 #if 0
@@ -75,12 +78,21 @@ static void BM_get_face_elems_as_indices(BMFace *f, int *r_elem_array, int *r_el
 static BMLoop* BM_face_find_best_tan_match_loop(BMFace *f_src, BMLoop *l_dst);
 #endif
 
+static bool bmesh_index_mapping_vert_face_loop_loop(BMesh *bm_src, BMElem **array_dst, int array_dst_len,
+                                                    int *face_index_mapping,
+                                                    int **index_mapping_in, int *init_index_mapping_len,
+                                                    int ***r_index_mapping_out, int **r_index_mapping_out_len,
+                                                    bool respect_islands, int cd_offset);
+static bool bmesh_index_mapping_vert_face_vert_vert(BMesh *bm_src, int array_dst_len,
+                                                    int **index_mapping_in, int *init_index_mapping_len,
+                                                    int ***r_index_mapping_out, int **r_index_mapping_out_len);
+static bool bmesh_index_mapping_face_face_vert_face(BMElem **array_dst, int array_dst_len,
+                                                    int *index_mapping_in,
+                                                    int ***r_index_mapping_out, int **r_index_mapping_out_len);
+
 static int *BM_transform_index_mapping(BMesh *bm_src, BMElem **array_dst, int array_dst_count, int *index_mapping_in,
                                        int htype_from, int htype_to);
-static bool BM_transform_index_multi_mapping(BMesh *bm_src, BMElem **array_dst, int array_dst_count, int *index_mapping_in,
-                                             int htype_from, int htype_to, int ***r_index_mapping_out,
-                                             int **r_index_mapping_out_len,
-                                             bool respect_islands, int cd_offset);
+
 static void *BM_mesh_mapping(BMesh *bm_src, BMesh *bm_dst, const char htype);
 
 //--------------index transfer declarations ----------
@@ -653,18 +665,10 @@ static void BM_mesh_transfer_interpolated(BMesh *bm_src, BMesh *bm_dst, const ch
 			array_dst = BM_iter_as_arrayN(bm_dst, BM_VERTS_OF_MESH, NULL, &array_dst_len, NULL, 0);
 
 			init_index_mapping = BM_mesh_mapping(bm_src, bm_dst, BM_FACE);
-			//readable form
-			/*BM_transform_index_multi_mapping(bm_src, array_dst, array_dst_len, init_index_mapping, BM_FACE, BM_VERT,
-			                                 &fin_index_mapping, &fin_index_mapping_len,
-			                                 false, 0);
 
-			fin_index_mapping_layers[0] = fin_index_mapping;
-			fin_index_mapping_len_layers[0] = fin_index_mapping_len;
-			fin_index_mapping_weights_layers[0] = fin_index_mapping_weights;*/
-
-			BM_mesh_mapping_converter(bm_src, array_dst, array_dst_len, init_index_mapping, htype_map_from, htype_map_to,
-									  fin_index_mapping_layers,
-			                          fin_index_mapping_len_layers, false, 0);
+			BM_mesh_mapping_converter(bm_src, NULL, array_dst, array_dst_len, init_index_mapping, NULL,
+			                          htype_map_from, htype_map_to,
+									  fin_index_mapping_layers, fin_index_mapping_len_layers, false, 0);
 
 			BM_calculate_weights(array_src, array_dst, array_dst_len,
 			                     *fin_index_mapping_layers,
@@ -708,7 +712,8 @@ static void BM_mesh_transfer_interpolated(BMesh *bm_src, BMesh *bm_dst, const ch
 				for (dst_n = dst_lay_start; dst_n <= dst_lay_end; dst_n++) {
 					dst_lay_curr = dst_n - dst_lay_start;
 
-					BM_mesh_mapping_converter(bm_src, array_dst, array_dst_len, init_index_mapping, htype_map_from, htype_map_to,
+					BM_mesh_mapping_converter(bm_src, bm_dst, array_dst, array_dst_len, init_index_mapping, NULL,
+					                          htype_map_from, htype_map_to,
 											  &fin_index_mapping_layers[dst_lay_curr],
 					                          &fin_index_mapping_len_layers[dst_lay_curr], true, dst_n);
 
@@ -721,7 +726,8 @@ static void BM_mesh_transfer_interpolated(BMesh *bm_src, BMesh *bm_dst, const ch
 			}
 			else {
 
-				BM_mesh_mapping_converter(bm_src, array_dst, array_dst_len, init_index_mapping, htype_map_from, htype_map_to,
+				BM_mesh_mapping_converter(bm_src, bm_dst, array_dst, array_dst_len, init_index_mapping, NULL,
+				                          htype_map_from, htype_map_to,
 										  fin_index_mapping_layers, fin_index_mapping_len_layers, false, 0);
 
 				BM_calculate_weights(array_src, array_dst, array_dst_len,
@@ -1047,98 +1053,90 @@ static int *BM_transform_index_mapping(BMesh *bm_src, BMElem **array_dst, int ar
 }
 
 /**
- * uses preset loop indices
- * this function results in 1:N mapping
- * TODO: split the function into two
-*/
+ * @brief bmesh_index_mapping_vert_face_loop_loop
+ * transform the mapping of each face to verts
+ * note: we could alter the input directly, but it's chosen to return a new mapping for the sake of consistency
+ * todo: consider whether to split this function for every new behaviour or leave it as its (ie: respect_islands == true)
+ */
 
-static bool BM_transform_index_multi_mapping(BMesh *bm_src, BMElem **array_dst, int array_dst_count, int *index_mapping_in,
-                                             int htype_from, int htype_to, int ***r_index_mapping_out,
-                                             int **r_index_mapping_out_len,
-                                             bool respect_islands, int cd_offset)
+static bool bmesh_index_mapping_vert_face_loop_loop(BMesh *bm_src, BMElem **array_dst, int array_dst_len,
+                                                    int *face_index_mapping,
+                                                    int **index_mapping_in, int *init_index_mapping_len,
+                                                    int ***r_index_mapping_out, int **r_index_mapping_out_len,
+                                                    bool respect_islands, int cd_offset)
 {
 	BMElem *ele_dst;
-	BMFace **f_array_src = MEM_mallocN(bm_src->totface * sizeof(*f_array_src),
-	                                   "f_array_src bmesh_data_transfer.c");
-	int array_src_count = BM_iter_as_array(bm_src, BM_FACES_OF_MESH, NULL, (void **)f_array_src, bm_src->totface);
 
-	int i;
+	int **index_mapping_out = MEM_mallocN(array_dst_len * sizeof(*index_mapping_out),
+	                                      "index_mapping_out bmesh_data_transfer.c");
+	int *index_mapping_out_len = MEM_mallocN(array_dst_len * sizeof(*index_mapping_out_len),
+	                                         "index_mapping_out_len bmesh_data_transfer.c");
+	int i, k;
 
-	int **index_mapping_out = MEM_mallocN(array_dst_count * sizeof(*index_mapping_out),
-	                                      "r_index_mapping_out bmesh_data_transfer.c");
-	int *index_mapping_out_len = MEM_mallocN(array_dst_count * sizeof(*index_mapping_out_len),
-	                                         "r_index_mapping_out_len bmesh_data_transfer.c");
-	float **index_mapping_out_weights = MEM_mallocN(array_dst_count * sizeof(*index_mapping_out_weights),
-	                                                "r_index_mapping_out_weights bmesh_data_transfer.c");
+	BMFace **f_array_src = MEM_mallocN(bm_src->totface * sizeof(*f_array_src), "f_array_src bmesh_data_transfer.c");
+	int f_array_src_count = BM_iter_as_array(bm_src, BM_FACES_OF_MESH, NULL, (void **)f_array_src, bm_src->totface);
 
+	int **loops_of_face_mapping = MEM_mallocN(f_array_src_count * sizeof(*loops_of_face_mapping),
+											  "loops_of_face_mapping bmesh_data_transfer.c");
+	int *loops_of_face_mapping_len = MEM_mallocN(f_array_src_count * sizeof(*loops_of_face_mapping_len),
+											  "loops_of_face_mapping_len bmesh_data_transfer.c");
 
-	//transformation rules: every dst loop should get all the f_src's loops with their weights
-	if (htype_from == BM_FACE && htype_to == BM_LOOP) {
-		int **loops_of_face_mapping = MEM_mallocN(array_src_count * sizeof(*loops_of_face_mapping),
-		                                          "loops_of_face_mapping bmesh_data_transfer.c");
-		int *loops_of_face_mapping_len = MEM_mallocN(array_src_count * sizeof(*loops_of_face_mapping_len),
-		                                          "loops_of_face_mapping_len bmesh_data_transfer.c");
-		int **loops_of_island_mapping;
-		int *loops_of_island_mapping_len;
+	int f_src_index, f_dst_index;
+	BMLoop *l_dst;
+	BMFace *f_src;
 
-		int f_src_index, f_dst_index;
-		BMLoop *l_dst;
-		BMFace *f_src;
+	int v_dst_index;
 
-		int *groups_array;
-		int (*group_index)[2];
-		int group_tot;
+	int *groups_array;
+	int (*group_index)[2];
+	int group_tot;
 
-		BMLoop **l_array = MEM_mallocN(sizeof(*l_array) * bm_src->totloop, "l_array bmesh_data_transfer.c");
-		BM_iter_loops_as_array(bm_src, (BMElem **)l_array, bm_src->totloop);
+	//get all the loops in advance
+	for (i = 0; i < f_array_src_count; i++) {
+		//get the source face
+		f_src = f_array_src[i];
 
-		//get all the loops in advance
-		for (i = 0; i < array_src_count; i++) {
-			//get the source face
-			f_src = f_array_src[i];
+		//get the loops of each source face
+		BM_get_face_loops_as_indices(f_src, &loops_of_face_mapping[i], &loops_of_face_mapping_len[i]);
+	}
 
-			//get the loops of each source face
-			BM_get_face_loops_as_indices(f_src, &loops_of_face_mapping[i], &loops_of_face_mapping_len[i]);
+	//deal with layers that get their data transfered differently according to the values of those data!
+	if (respect_islands == true) {		//here CD_MLOOPUV respects the islands
+
+		//get the source islands
+		groups_array = MEM_mallocN(sizeof(*groups_array) * bm_src->totface, "groups_array bmesh_data_transfer.c");
+		group_tot = BM_mesh_calc_face_groups(bm_src, groups_array, &group_index, NULL,
+												 BM_loops_are_connecting_islands_cb, &cd_offset, 0, BM_LOOP);
+
+	}
+
+	for (i = 0; i < array_dst_len; i++) {	//for each destination loop
+		int basic_island_id, island_id;
+
+		//initial allocation with 1
+		index_mapping_out[i] = MEM_mallocN(sizeof(**index_mapping_out), "index_mapping_out[i] bmesh_data_transfer.c");
+
+		//initial setting of zero
+		index_mapping_out_len[i] = 0;
+
+		//get a loop from the destination array
+		ele_dst = array_dst[i];
+		l_dst = (BMLoop *) ele_dst;
+
+		f_dst_index = BM_elem_index_get(l_dst->f);
+		//get the respective island_id
+		if (respect_islands == true) {
+			basic_island_id = get_island_id(groups_array, group_index, group_tot, face_index_mapping[f_dst_index]);
 		}
 
-		//deal with layers that get their data transfered differently according to the values of those data!
-		if (respect_islands == true) {		//here CD_MLOOPUV respects the islands
+		//get the cooresponding vertex index
+		v_dst_index = BM_elem_index_get(l_dst->v);
 
-			//get the source islands
-			groups_array = MEM_mallocN(sizeof(*groups_array) * bm_src->totface, "groups_array bmesh_data_transfer.c");
-			group_tot = BM_mesh_calc_face_groups(bm_src, groups_array, &group_index, NULL,
-			                                         BM_loops_are_connecting_islands_cb, &cd_offset, 0, BM_LOOP);
-
-			//get the loops of each source island
-			loops_of_island_mapping = MEM_mallocN(sizeof(*loops_of_island_mapping) * group_tot,
-			                                      "loops_of_island_mapping bmesh_data_transfer.c");
-			loops_of_island_mapping_len = MEM_mallocN(sizeof(*loops_of_island_mapping_len) * group_tot,
-			                                          "loops_of_island_mapping_len bmesh_data_transfer.c");
-			BM_get_island_loops_as_indices(f_array_src, array_src_count, loops_of_face_mapping,
-			                               groups_array, group_index, group_tot,
-			                               loops_of_island_mapping, loops_of_island_mapping_len);
-
-		}
-
-		for (i = 0; i < array_dst_count; i++) {	//for each destination loop
-			int island_id;
-
-			//initial allocation with 1
-			index_mapping_out[i] = MEM_mallocN(sizeof(**index_mapping_out),
-			                                   "index_mapping_out[i] bmesh_data_transfer.c");
-
-			//initial setting of zero
-			index_mapping_out_len[i] = 0;
-
-			//get a loop from the destination array
-			ele_dst = array_dst[i];
-			l_dst = (BMLoop *) ele_dst;
-
-			//get the destination face index
-			f_dst_index = BM_elem_index_get(l_dst->f);
+		//iterate the f_src(s) corresponding to the loop's vert
+		for (k = 0; k < init_index_mapping_len[v_dst_index]; k++) {
 
 			//get the source face index
-			f_src_index = index_mapping_in[f_dst_index];
+			f_src_index = index_mapping_in[v_dst_index][k];
 
 			//check it has got a mapping
 			if (f_src_index == -1) { //should never be reached in the current scenario
@@ -1150,116 +1148,180 @@ static bool BM_transform_index_multi_mapping(BMesh *bm_src, BMElem **array_dst, 
 			//get the respective loop mapping for each loop
 			if (respect_islands == true) {
 				island_id = get_island_id(groups_array, group_index, group_tot, f_src_index);
+				if (island_id == basic_island_id) {	//valid face to trasnf. from
 
-				append_index_list(&index_mapping_out[i], index_mapping_out_len[i], loops_of_island_mapping[island_id],
-				                  loops_of_island_mapping_len[island_id]);
-				index_mapping_out_len[i] = loops_of_island_mapping_len[island_id];
-
+					//append the respective verts
+					append_index_list(&index_mapping_out[i], index_mapping_out_len[i],
+					                  loops_of_face_mapping[f_src_index], loops_of_face_mapping_len[f_src_index]);
+					index_mapping_out_len[i] += loops_of_face_mapping_len[f_src_index];
+				}
 			}
 			else {
 				append_index_list(&index_mapping_out[i], index_mapping_out_len[i], loops_of_face_mapping[f_src_index],
-				                  loops_of_face_mapping_len[f_src_index]);
+								  loops_of_face_mapping_len[f_src_index]);
 				index_mapping_out_len[i] = loops_of_face_mapping_len[f_src_index];
 
 			}
-		}
-
-		if (respect_islands == true) {
-			MEM_freeN(groups_array);
-			MEM_freeN(group_index);
-
-			for (i = 0; i < group_tot; i++) {
-				MEM_freeN(loops_of_island_mapping[i]);
-			}
-
-			MEM_freeN(loops_of_island_mapping);
-			MEM_freeN(loops_of_island_mapping_len);
 
 		}
-
-		for (i = 0; i < array_src_count; i++) {
-			MEM_freeN(loops_of_face_mapping[i]);
-		}
-
-		MEM_freeN(loops_of_face_mapping);
-		MEM_freeN(loops_of_face_mapping_len);
-		MEM_freeN(l_array);
 	}
+
+	if (respect_islands == true) {
+		MEM_freeN(groups_array);
+		MEM_freeN(group_index);
+	}
+
+	for (i = 0; i < f_array_src_count; i++) {
+		MEM_freeN(loops_of_face_mapping[i]);
+	}
+
+	MEM_freeN(loops_of_face_mapping);
+	MEM_freeN(loops_of_face_mapping_len);
+
+	MEM_freeN(f_array_src);
+
+	*r_index_mapping_out = index_mapping_out;
+	*r_index_mapping_out_len = index_mapping_out_len;
+
+	return true;
+}
+
+/**
+ * @brief bmesh_index_mapping_vert_face_vert_vert
+ * transform the mapping of each face to verts
+ * note: we could alter the input directly, but it's chosen to return a new mapping for the sake of consistency
+ */
+
+static bool bmesh_index_mapping_vert_face_vert_vert(BMesh *bm_src, int array_dst_len,
+                                                    int **index_mapping_in, int *init_index_mapping_len,
+                                                    int ***r_index_mapping_out, int **r_index_mapping_out_len)
+{
+	int **index_mapping_out = MEM_mallocN(array_dst_len * sizeof(*index_mapping_out),
+	                                      "index_mapping_out bmesh_data_transfer.c");
+	int *index_mapping_out_len = MEM_mallocN(array_dst_len * sizeof(*index_mapping_out_len),
+	                                         "index_mapping_out_len bmesh_data_transfer.c");
 
 	//transformation rules: every dst vert should get all the verts in the corresponding mapped faces to the faces that
 	//share this vert
-	else if (htype_from == BM_FACE && htype_to == BM_VERT) {	//the mapping Should result in N:M then 1:N mapping
-		int f_src_index, f_dst_index;
-		BMVert *v_dst;
-		BMFace *f_dst, *f_src;
-		BMIter iter;
-		int *mapping_list;
-		float (*co_list)[3];
-		float (*total_co_list)[3] = MEM_mallocN(sizeof(*total_co_list), "total_co_list bmesh_data_transfer.c");
+	int f_src_index;
+	BMFace *f_src;
+	int *mapping_list;
+	int i, k;
 
-		for (i = 0; i < array_dst_count; i++) {	//for each destination vert
+	BMFace **f_array_src = MEM_mallocN(bm_src->totface * sizeof(*f_array_src), "f_array_src bmesh_data_transfer.c");
+	BM_iter_as_array(bm_src, BM_FACES_OF_MESH, NULL, (void **)f_array_src, bm_src->totface);
 
-			//initial allocation with 1
-			index_mapping_out[i] = MEM_mallocN(sizeof(**index_mapping_out),
-			                                   "index_mapping_out[i] bmesh_data_transfer.c");
+	for (i = 0; i < array_dst_len; i++) {	//for each destination vert
 
-			//initial setting of zero
-			index_mapping_out_len[i] = 0;
+		//initial allocation with 1
+		index_mapping_out[i] = MEM_mallocN(sizeof(**index_mapping_out),
+										   "index_mapping_out[i] bmesh_data_transfer.c");
 
-			//get a vert from the destination array
-			ele_dst = array_dst[i];
-			v_dst = (BMVert*) ele_dst;
+		//initial setting of zero
+		index_mapping_out_len[i] = 0;
 
-			//todo: remove this part to preceed the vertex list iteration, to avoid searching the same face twice
-			//get the destination faces
-			BM_ITER_ELEM (f_dst, &iter, v_dst, BM_FACES_OF_VERT) {
+		//todo: remove this part to preceed the vertex list iteration, to avoid searching the same face twice
+		//get the destination faces
+		for (k = 0; k < init_index_mapping_len[i]; k++) {
 
-				//get the destination face index
-				f_dst_index = BM_elem_index_get(f_dst);
+			//get the source face index
+			f_src_index = index_mapping_in[i][k];
 
-				//get the source face index
-				f_src_index = index_mapping_in[f_dst_index];
-
-				//check it has got a mapping
-				if (f_src_index == -1) { //should never be reached in the current scenario
-					continue;
-				}
-
-				//get the source face
-				f_src = f_array_src[f_src_index];
-
-				//append the respective verts
-				BM_get_face_verts_as_indices(f_src, &mapping_list, NULL);
-
-				append_index_list(&index_mapping_out[i], index_mapping_out_len[i], mapping_list, f_src->len);
-
-				//get co list for the source verts
-				BM_get_face_coord_list(&co_list, f_src);
-
-				append_co_list(&total_co_list, index_mapping_out_len[i], co_list, f_src->len);
-
-				index_mapping_out_len[i] += f_src->len;
-
-				MEM_freeN(co_list);
-				MEM_freeN(mapping_list);
-			}
-
-			//free allocated memory if we didn't receive a mapping from any of the surrounding faces
-			if (index_mapping_out_len[i] == 0) {
-				MEM_freeN(index_mapping_out[i]);
+			//check it has got a mapping
+			if (f_src_index == -1) { //should never be reached in the current scenario
 				continue;
 			}
+
+			//get the source face
+			f_src = f_array_src[f_src_index];
+
+			//append the respective verts
+			BM_get_face_verts_as_indices(f_src, &mapping_list, NULL);
+
+			append_index_list(&index_mapping_out[i], index_mapping_out_len[i], mapping_list, f_src->len);
+
+			index_mapping_out_len[i] += f_src->len;
+
+			MEM_freeN(mapping_list);
 		}
 
-		MEM_freeN(total_co_list);
-	}
-
-	else {
-		BLI_assert(0);
-		return false;
+		//free allocated memory if we didn't receive a mapping from any of the surrounding faces
+		if (index_mapping_out_len[i] == 0) {
+			MEM_freeN(index_mapping_out[i]);
+			continue;
+		}
 	}
 
 	MEM_freeN(f_array_src);
+
+	*r_index_mapping_out = index_mapping_out;
+	*r_index_mapping_out_len = index_mapping_out_len;
+
+	return true;
+}
+
+/**
+ * @brief bmesh_index_mapping_face_face_vert_face
+ * transf. rule: every dst vert should get all the corresponding mapped faces to the faces that share this vert
+ * note: only 1 src/dst face mapping is accepted
+ */
+
+static bool bmesh_index_mapping_face_face_vert_face(BMElem **array_dst, int array_dst_len,
+                                                    int *index_mapping_in,
+                                                    int ***r_index_mapping_out, int **r_index_mapping_out_len)
+{
+	BMElem *ele_dst;
+	int i;
+
+	int **index_mapping_out = MEM_mallocN(array_dst_len * sizeof(*index_mapping_out),
+	                                      "index_mapping_out bmesh_data_transfer.c");
+	int *index_mapping_out_len = MEM_mallocN(array_dst_len * sizeof(*index_mapping_out_len),
+	                                         "index_mapping_out_len bmesh_data_transfer.c");
+
+	int f_src_index, f_dst_index;
+	BMVert *v_dst;
+	BMFace *f_dst;
+	BMIter iter;
+
+	for (i = 0; i < array_dst_len; i++) {	//for each destination vert
+		//initial allocation with 1
+		index_mapping_out[i] = MEM_mallocN(sizeof(**index_mapping_out),
+										   "index_mapping_out[i] bmesh_data_transfer.c");
+
+		//initial setting of zero
+		index_mapping_out_len[i] = 0;
+
+		//get a vert from the destination array
+		ele_dst = array_dst[i];
+		v_dst = (BMVert*) ele_dst;
+
+		//get the destination faces
+		BM_ITER_ELEM (f_dst, &iter, v_dst, BM_FACES_OF_VERT) {
+
+			//get the destination face index
+			f_dst_index = BM_elem_index_get(f_dst);
+
+			//get the source face index
+			f_src_index = index_mapping_in[f_dst_index];
+
+			//check it has got a mapping
+			if (f_src_index == -1) { //should never be reached in the current scenario
+				continue;
+			}
+
+			//append the respective face index
+			append_index_list(&index_mapping_out[i], index_mapping_out_len[i], &f_src_index, 1);
+
+			index_mapping_out_len[i] += 1;
+
+		}
+
+		//free allocated memory if we didn't receive a mapping from any of the surrounding faces
+		if (index_mapping_out_len[i] == 0) {
+			MEM_freeN(index_mapping_out[i]);
+			continue;
+		}
+	}
 
 	*r_index_mapping_out = index_mapping_out;
 	*r_index_mapping_out_len = index_mapping_out_len;
@@ -1341,6 +1403,7 @@ static int BM_iter_loops_as_array(BMesh *bm, BMElem **array, int len)
 	return i;
 }
 
+#if 0
 static void BM_get_face_coord_list(float (**r_co_list)[3], BMFace *f)
 {
 	BMVert *v;
@@ -1356,6 +1419,7 @@ static void BM_get_face_coord_list(float (**r_co_list)[3], BMFace *f)
 
 	*r_co_list = co_list;
 }
+#endif
 
 static void BM_get_elem_map_coord_list(BMElem **ele_array, float (**r_co_list)[3], int *ele_map, int len, int htype)
 {
@@ -1468,6 +1532,7 @@ static void append_index_list(int **r_out_list, const int out_list_len, int *in_
 	*r_out_list = out_list;
 }
 
+#if 0
 /**
  * r_out_list must be pre-allocated with MEM_mallocN to any size
  * todo: change the behaviour of inner reallocation
@@ -1484,6 +1549,7 @@ static void append_co_list(float (**r_out_list)[3], const int out_list_len, floa
 
 	*r_out_list = out_list;
 }
+#endif
 
 static bool BM_loops_are_connecting_islands_cb(BMElem *ele1, BMElem *ele2, void *p_cd_loop_uv_offset)
 {
@@ -1543,6 +1609,7 @@ static bool BM_loops_are_connecting_islands_cb(BMElem *ele1, BMElem *ele2, void 
 	return is_welded;
 }
 
+#if 0
 static void BM_get_island_loops_as_indices(BMFace **array_src, int array_src_count, int **loops_of_face_mapping,
                                            int *groups_array, int (*group_index)[2], int group_tot,
                                            int **r_loops_of_island_mapping, int *r_loops_of_island_mapping_len)
@@ -1590,6 +1657,7 @@ static void BM_get_island_loops_as_indices(BMFace **array_src, int array_src_cou
 		r_loops_of_island_mapping_len[island_id] += f->len;
 	}
 }
+#endif
 
 //return -1 upon failure
 
@@ -1630,58 +1698,97 @@ static int get_island_id(int *groups_array, int (*group_index)[2], int group_tot
 	return -1;
 }
 
-bool BM_mesh_mapping_converter(BMesh *bm_src, BMElem **array_dst, int array_dst_len,void *init_index_mapping,
-                               struct HTypeMapping *htype_map_src, struct HTypeMapping *htype_map_dst,
-                               void *mid_index_mapping, void *mid_index_mapping_len, int respect_islands, int cd_offset)
+bool BM_mesh_mapping_converter(BMesh *bm_src, BMesh *bm_dst, BMElem **array_dst, int array_dst_len,
+                               void *init_index_mapping, void *init_index_mapping_len,
+                               struct HTypeMapping *htype_map_from, struct HTypeMapping *htype_map_to,
+                               void *fin_index_mapping, void *fin_index_mapping_len, int respect_islands, int cd_offset)
 {
-	int htype_map_src_from, htype_map_src_to, htype_map_dst_from, htype_map_dst_to;
+	int ***mid_index_mapping = MEM_mallocN(sizeof(*mid_index_mapping), "mid_index_mapping bmesh_data_transfer.c");
+	int **mid_index_mapping_len = MEM_mallocN(sizeof(*mid_index_mapping_len), "mid_index_mapping_len bmesh_data_transfer.c");
+	int map_from_src, map_from_dst, map_to_src, map_to_dst;
 
-	htype_map_src_from = htype_map_src->htype_from;
-	htype_map_src_to = htype_map_src->htype_to;
-	htype_map_dst_from = htype_map_dst->htype_from;
-	htype_map_dst_to = htype_map_dst->htype_to;
+	map_from_src = htype_map_from->htype_src;
+	map_from_dst = htype_map_from->htype_dst;
+	map_to_src = htype_map_to->htype_src;
+	map_to_dst = htype_map_to->htype_dst;
 
-	if (htype_map_src_from == BM_FACE && htype_map_src_to == BM_FACE && htype_map_dst_from == BM_VERT && htype_map_dst_to == BM_FACE) {
-		printf("%s: function is not implemented yet", __func__);
-		return false;
+	if (map_from_src == BM_FACE && map_from_dst == BM_FACE && map_to_src == BM_VERT && map_to_dst == BM_FACE) {
+		bmesh_index_mapping_face_face_vert_face(array_dst, array_dst_len, init_index_mapping,
+		                                        fin_index_mapping, fin_index_mapping_len);
 	}
 
-	else if (htype_map_src_from == BM_VERT && htype_map_src_to == BM_FACE && htype_map_dst_from == BM_VERT && htype_map_dst_to == BM_VERT) {
-		printf("%s: function is not implemented yet", __func__);
-		return false;
+	else if (map_from_src == BM_VERT && map_from_dst == BM_FACE && map_to_src == BM_VERT && map_to_dst == BM_VERT) {
+		bmesh_index_mapping_vert_face_vert_vert(bm_src, array_dst_len, init_index_mapping, init_index_mapping_len,
+		                                        fin_index_mapping, fin_index_mapping_len);
 	}
 
-	else if (htype_map_src_from == BM_VERT && htype_map_src_to == BM_FACE && htype_map_dst_from == BM_LOOP && htype_map_dst_to == BM_LOOP) {
-		printf("%s: function is not implemented yet", __func__);
-		return false;
+	else if (map_from_src == BM_VERT && map_from_dst == BM_FACE && map_to_src == BM_LOOP && map_to_dst == BM_LOOP) {
+		int *face_index_mapping = BM_mesh_mapping(bm_src, bm_dst, BM_FACE);
+		bmesh_index_mapping_vert_face_loop_loop(bm_src, array_dst, array_dst_len, face_index_mapping,
+		                                        init_index_mapping, init_index_mapping_len,
+		                                        fin_index_mapping, fin_index_mapping_len, respect_islands, cd_offset);
+		MEM_freeN(face_index_mapping);
 	}
 
-	else if (htype_map_src_from == BM_FACE && htype_map_src_to == BM_FACE && htype_map_dst_from == BM_VERT && htype_map_dst_to == BM_VERT) {
-		BM_transform_index_multi_mapping(bm_src, array_dst, array_dst_len, init_index_mapping, BM_FACE, BM_VERT,
-		                                 mid_index_mapping, mid_index_mapping_len, respect_islands, cd_offset);
+	else if (map_from_src == BM_FACE && map_from_dst == BM_FACE && map_to_src == BM_VERT && map_to_dst == BM_VERT) {
+		int i;
+
+		bmesh_index_mapping_face_face_vert_face(array_dst, array_dst_len, init_index_mapping,
+		                                        mid_index_mapping, mid_index_mapping_len);
+
+		bmesh_index_mapping_vert_face_vert_vert(bm_src, array_dst_len, *mid_index_mapping, *mid_index_mapping_len,
+		                                        fin_index_mapping, fin_index_mapping_len);
+
+		for (i = 0; i < array_dst_len; i++) {
+			MEM_freeN((*mid_index_mapping)[i]);
+		}
+
 	}
 
-	else if (htype_map_src_from == BM_FACE && htype_map_src_to == BM_FACE && htype_map_dst_from == BM_LOOP && htype_map_dst_to == BM_LOOP) {
-		BM_transform_index_multi_mapping(bm_src, array_dst, array_dst_len, init_index_mapping, BM_FACE, BM_LOOP,
-		                                 mid_index_mapping, mid_index_mapping_len, respect_islands, cd_offset);
+	else if (map_from_src == BM_FACE && map_from_dst == BM_FACE && map_to_src == BM_LOOP && map_to_dst == BM_LOOP) {
 
+		//iterating the dst_elements should occur whenever we introduce the usage of a new htype
+		//here we're introducing the BMVert
+		BMElem ** v_array_dst;
+		int v_array_dst_len;
+		int i;
+
+		v_array_dst = BM_iter_as_arrayN(bm_dst, BM_VERTS_OF_MESH, NULL, &v_array_dst_len, NULL, 0);
+
+		bmesh_index_mapping_face_face_vert_face(v_array_dst, v_array_dst_len, init_index_mapping,
+		                                        mid_index_mapping, mid_index_mapping_len);
+
+		bmesh_index_mapping_vert_face_loop_loop(bm_src, array_dst, array_dst_len, init_index_mapping,
+		                                        *mid_index_mapping, *mid_index_mapping_len,
+		                                        fin_index_mapping, fin_index_mapping_len, respect_islands, cd_offset);
+		for (i = 0; i < v_array_dst_len; i++) {
+			MEM_freeN((*mid_index_mapping)[i]);
+		}
+
+		MEM_freeN(v_array_dst);
 	}
 
 	else {
 		printf("%s: requested unsupported type of mapping", __func__);
+		MEM_freeN(mid_index_mapping);
+		MEM_freeN(mid_index_mapping_len);
 		return false;
 	}
 
+	MEM_freeN(*mid_index_mapping);
+	MEM_freeN(mid_index_mapping);
+	MEM_freeN(*mid_index_mapping_len);
+	MEM_freeN(mid_index_mapping_len);
 	return true;
 }
 
-static void BM_set_htype_mapping(struct HTypeMapping *htype_map_src, struct HTypeMapping *htype_map_dst,
-                                 int htype_src_from, int htype_src_to, int htype_dst_from, int htype_dst_to)
+static void BM_set_htype_mapping(struct HTypeMapping *htype_map_from, struct HTypeMapping *htype_map_to,
+                                 int htype_from_src, int htype_from_dst, int htype_to_src, int htype_to_dst)
 {
-	htype_map_src->htype_from = htype_src_from;
-	htype_map_src->htype_to = htype_src_to;
-	htype_map_dst->htype_from = htype_dst_from;
-	htype_map_dst->htype_to = htype_dst_to;
+	htype_map_from->htype_src = htype_from_src;
+	htype_map_from->htype_dst = htype_from_dst;
+	htype_map_to->htype_src = htype_to_src;
+	htype_map_to->htype_dst = htype_to_dst;
 }
 
 static void BM_calculate_weights(BMElem **array_src, BMElem **array_dst, int array_dst_len, int **index_mapping,

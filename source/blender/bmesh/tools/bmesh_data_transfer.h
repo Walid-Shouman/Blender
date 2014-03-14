@@ -55,8 +55,8 @@ typedef enum TransferMode {
 } TransferMode;
 
 struct HTypeMapping {
-    int htype_from;
-    int htype_to;
+    int htype_src;
+    int htype_dst;
 } HTypeMapping;
 
 bool BM_mesh_data_copy(BMesh *bm_src, BMesh* bm_dst, const struct ReplaceLayerInfo *replace_info, int type,
