@@ -118,7 +118,8 @@ static void set_loop_indices(BMesh *bm);
 static void BM_mesh_cd_transfer_interpolated(CustomData *cd_src, BMElem **array_src, int array_src_count,
                                              CustomData *cd_dst, BMElem **array_dst, int array_dst_count,
                                              const int layer_type, const struct ReplaceLayerInfo *replace_info,
-                                             int **index_mapping, int *index_mapping_count, float **index_mapping_weights);
+                                             int ***index_mapping_layers, int **index_mapping_count_layers,
+                                             float ***index_mapping_weights_layers);
 
 static void BM_mesh_transfer_interpolated(BMesh *bm_src, BMesh *bm_dst, const char htype, const int layer_type,
                                     const struct ReplaceLayerInfo *replace_info);
@@ -550,9 +551,10 @@ static void BM_mesh_transfer_mapped(BMesh *bm_src, BMesh *bm_dst, const char hty
  */
 
 static void BM_mesh_cd_transfer_interpolated(CustomData *cd_src, BMElem **array_src, int array_src_count,
-                                CustomData *cd_dst, BMElem **array_dst, int array_dst_count,
-                                const int layer_type, const struct ReplaceLayerInfo *replace_info,
-                                int **index_mapping, int *index_mapping_count, float **index_mapping_weights)
+                                             CustomData *cd_dst, BMElem **array_dst, int array_dst_count,
+                                             const int layer_type, const struct ReplaceLayerInfo *replace_info,
+                                             int ***index_mapping_layers, int **index_mapping_count_layers,
+                                             float ***index_mapping_weights_layers)
 {
 	//... copy between arrays with a mapping! ...
 	int dst_lay_start = replace_info->dst_lay_start;
@@ -561,7 +563,8 @@ static void BM_mesh_cd_transfer_interpolated(CustomData *cd_src, BMElem **array_
 	int src_n, dst_n;
 	int dst_n_offset;
 	int *ele_src_list;
-	float **index_mapping_weights_iter = index_mapping_weights;
+	int *index_mapping_count = index_mapping_count_layers[0];
+	float **index_mapping_weights = index_mapping_weights_layers[0];
 
 	if (array_dst && array_src) {
 		int i, k;
@@ -574,11 +577,11 @@ static void BM_mesh_cd_transfer_interpolated(CustomData *cd_src, BMElem **array_
 			BMElem *ele_src;
 			BMElem *ele_dst;
 
-			if (index_mapping[i] == NULL) {	//shall never be reached!!
+			if (index_mapping_layers[0][i] == NULL) {	//shall never be reached!!
 				continue;
 			}
 
-			ele_src_list = index_mapping[i];
+			ele_src_list = (*index_mapping_layers)[i];
 			ele_dst = array_dst[i];
 
 			for (dst_n = dst_lay_start, src_n = src_lay_start; dst_n <= dst_lay_end; dst_n++, src_n++) {
@@ -597,15 +600,18 @@ static void BM_mesh_cd_transfer_interpolated(CustomData *cd_src, BMElem **array_
 					break;
 				}
 
-				CustomData_bmesh_interp_n(cd_dst, ptr, index_mapping_weights_iter[i], NULL, index_mapping_count[i],
+				CustomData_bmesh_interp_n(cd_dst, ptr, index_mapping_weights[i], NULL, index_mapping_count[i],
 				                          ele_dst->head.data, dst_n_offset);
 
 				//better to treat the CD_MLOOPUV as a special case instead of increasing the computation for all the other
 				//layer_types,
 				//any supported CD that has different weights according to the layers, shall be added here too
 				if ((layer_type == CD_MLOOPUV) && (dst_n < dst_lay_end)) {
-					index_mapping_weights_iter = index_mapping_weights + (src_n - src_lay_start + 1);
-					ele_src_list = (index_mapping + (src_n - src_lay_start + 1))[i];
+					int offset = src_n - src_lay_start + 1;
+
+					index_mapping_count = index_mapping_count_layers[offset];
+					index_mapping_weights = index_mapping_weights_layers[offset];
+					ele_src_list = (index_mapping_layers[offset])[i];
 				}
 			}
 		}
@@ -772,8 +778,8 @@ static void BM_mesh_transfer_interpolated(BMesh *bm_src, BMesh *bm_dst, const ch
 	}
 
 	BM_mesh_cd_transfer_interpolated(cd_src, array_src, array_src_len, cd_dst, array_dst, array_dst_len, layer_type,
-	                                 replace_info, fin_index_mapping_layers[0], fin_index_mapping_len_layers[0],
-	                                 fin_index_mapping_weights_layers[0]);
+	                                 replace_info, fin_index_mapping_layers, fin_index_mapping_len_layers,
+	                                 fin_index_mapping_weights_layers);
 
 	MEM_freeN(array_dst);
 	MEM_freeN(array_src);
@@ -800,6 +806,7 @@ static void BM_mesh_transfer_interpolated(BMesh *bm_src, BMesh *bm_dst, const ch
 			}
 			MEM_freeN(fin_index_mapping);
 			MEM_freeN(fin_index_mapping_weights);
+			MEM_freeN(fin_index_mapping_len);
 		}
 	}
 	else {
@@ -818,9 +825,8 @@ static void BM_mesh_transfer_interpolated(BMesh *bm_src, BMesh *bm_dst, const ch
 		}
 		MEM_freeN(fin_index_mapping);
 		MEM_freeN(fin_index_mapping_weights);
+		MEM_freeN(fin_index_mapping_len);
 	}
-
-	MEM_freeN(fin_index_mapping_len);
 
 	MEM_freeN(fin_index_mapping_layers);
 	MEM_freeN(fin_index_mapping_len_layers);

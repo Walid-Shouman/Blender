@@ -1937,7 +1937,7 @@ int BM_mesh_calc_face_groups(BMesh *bm, int *r_groups_array, int (**r_group_inde
 
 	STACK_INIT(group_array);
 
-	BLI_assert(((htype_step & ~(BM_VERT | BM_EDGE)) == 0) && (htype_step != 0));
+	BLI_assert(((htype_step & ~(BM_VERT | BM_EDGE | BM_LOOP)) == 0) && (htype_step != 0));
 
 	/* init the array */
 	BM_ITER_MESH_INDEX (f, &iter, bm, BM_FACES_OF_MESH, i) {
